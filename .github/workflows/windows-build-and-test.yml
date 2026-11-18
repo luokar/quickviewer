@@ -29,6 +29,20 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Check out HEIF image plug-in
+        uses: actions/checkout@v7
+        with:
+          repository: novomesk/qt-heic-image-plugin
+          ref: 16e740ae05dd59f8f63330225c53ef657a854e1d
+          path: qt-heic-image-plugin
+
+      - name: Check out AVIF image plug-in
+        uses: actions/checkout@v7
+        with:
+          repository: novomesk/qt-avif-image-plugin
+          ref: 8c10a0d7283b1b5f5b5dbf24db70f2666984048c
+          path: qt-avif-image-plugin
+
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
@@ -82,6 +96,63 @@ jobs:
           }
           Add-Content -Path $env:GITHUB_PATH -Value $dir
 
+      - name: Install image plug-in build dependencies
+        shell: pwsh
+        run: |
+          $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT "vcpkg.exe"
+          if (-not (Test-Path $vcpkg)) {
+            throw "vcpkg.exe was not found at $vcpkg"
+          }
+          & $vcpkg install "libheif[core,libde265]:x64-windows" "libavif[aom]:x64-windows-static-md" "--overlay-triplets=$env:GITHUB_WORKSPACE/scripts/vcpkg-triplets"
+          if ($LASTEXITCODE -ne 0) {
+            throw "vcpkg failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Build release HEIF image plug-in
+        shell: pwsh
+        run: |
+          $vcpkgRoot = (Join-Path $env:VCPKG_INSTALLATION_ROOT "installed\x64-windows") -replace '\\', '/'
+          @"
+          TARGET = kimg_heif6
+          INCLUDEPATH += $vcpkgRoot/include
+          HEADERS += src/heif_p.h src/util_p.h
+          SOURCES += src/heif.cpp
+          OTHER_FILES += src/heif.json
+          LIBS += $vcpkgRoot/lib/heif.lib
+          TEMPLATE = lib
+          CONFIG += release skip_target_version_ext c++17 warn_on plugin
+          CONFIG -= debug separate_debug_info debug_and_release force_debug_info
+          "@ | Set-Content -Encoding ascii "qt-heic-image-plugin\qt-heic-image-plugin-ci.pro"
+
+          Push-Location qt-heic-image-plugin
+          try {
+            qmake qt-heic-image-plugin-ci.pro
+            if ($LASTEXITCODE -ne 0) {
+              throw "HEIF qmake failed with exit code $LASTEXITCODE"
+            }
+            jom
+            if ($LASTEXITCODE -ne 0) {
+              throw "HEIF build failed with exit code $LASTEXITCODE"
+            }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Build release AVIF image plug-in
+        shell: pwsh
+        run: |
+          $source = (Resolve-Path qt-avif-image-plugin).Path
+          $buildDir = "qt-avif-image-plugin/build-release"
+          cmake -S scripts/avif-plugin -B $buildDir -G Ninja "-DAVIF_SOURCE=$source" -DCMAKE_BUILD_TYPE=Release "-DCMAKE_PREFIX_PATH=$env:QT_ROOT_DIR" "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+          if ($LASTEXITCODE -ne 0) { throw "AVIF configure failed: $LASTEXITCODE" }
+          cmake --build $buildDir
+          if ($LASTEXITCODE -ne 0) { throw "AVIF build failed: $LASTEXITCODE" }
+          $imports = & dumpbin /nologo /dependents "$buildDir/qavif6.dll"
+          if ($LASTEXITCODE -ne 0) { throw "AVIF import inspection failed: $LASTEXITCODE" }
+          if ($imports -match '(?i)(avif|aom|libyuv|jpeg62)\.dll') {
+            throw "AVIF plug-in still imports a separate codec DLL: $imports"
+          }
+
       - name: Configure release build
         shell: cmd
         run: |
@@ -93,6 +164,14 @@ jobs:
         shell: cmd
         working-directory: build-release
         run: jom /f Makefile
+
+      - name: Build release image-format smoke probe
+        shell: cmd
+        run: |
+          mkdir build-imageformat-smoke
+          cd build-imageformat-smoke
+          qmake ..\tests\imageformats\imageformat-smoke.pro CONFIG+=release CONFIG-=debug CONFIG-=debug_and_release CONFIG-=debug_and_release_target
+          jom /f Makefile
 
       # A console-only or mislinked binary would not pull in the widget module,
       # so this catches a wrong TARGET or entry point before the release is
@@ -118,6 +197,25 @@ jobs:
             throw "windeployqt failed with exit code $LASTEXITCODE"
           }
 
+          # Ship both Release Qt image plug-ins with libheif's transitive DLLs.
+          # libavif and its codec libraries are statically linked into qavif6.dll.
+          $pluginDir = Join-Path $stage "imageformats"
+          New-Item -ItemType Directory -Force $pluginDir | Out-Null
+          $heif = Get-ChildItem ".\qt-heic-image-plugin" -Filter "kimg_heif6.dll" -Recurse |
+            Select-Object -First 1
+          if (-not $heif) { throw "Release HEIF plug-in was not built" }
+          $avif = "qt-avif-image-plugin/build-release/qavif6.dll"
+          if (-not (Test-Path $avif)) { throw "Release AVIF plug-in was not built" }
+          Copy-Item $heif.FullName $pluginDir -Force
+          Copy-Item $avif $pluginDir -Force
+
+          $runtimeDir = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed\x64-windows\bin"
+          $runtimeDlls = @(Get-ChildItem $runtimeDir -Filter "*.dll")
+          if (-not $runtimeDlls.Count) {
+            throw "No libheif runtime DLLs were found in $runtimeDir"
+          }
+          Copy-Item $runtimeDlls.FullName $stage -Force
+
           # windeployqt copies the D3D12 shader compilers even with the flags
           # above; the application never loads them.
           Remove-Item (Join-Path $stage "dxcompiler.dll") -ErrorAction SilentlyContinue
@@ -130,7 +228,8 @@ jobs:
             }
           }
           foreach ($required in @("QuickViewer.exe", "7z.dll", "Qt6Core.dll", "Qt6Gui.dll",
-                                  "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Sql.dll")) {
+                                  "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Sql.dll",
+                                  "imageformats\kimg_heif6.dll", "imageformats\qavif6.dll")) {
             if (-not (Test-Path (Join-Path $stage $required))) {
               throw "The deployment is missing $required"
             }
@@ -159,6 +258,34 @@ jobs:
             throw "The deployed application did not reach the first paint (exit code $($application.ExitCode))"
           }
           Write-Host "The deployed application reached the first paint."
+
+      - name: Smoke-test deployed HEIF/AVIF plug-ins and AVIF decoding
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP "qv-runtime"
+          $env:PATH = "$stage;$($env:SystemRoot)\system32;$($env:SystemRoot)"
+          $probe = Join-Path $stage "qv_imageformat_smoke.exe"
+          Copy-Item ".\build-imageformat-smoke\qv_imageformat_smoke.exe" $probe
+          try {
+            & $probe "tests\fileloader\data\avif\red.avif"
+            if ($LASTEXITCODE -ne 0) {
+              throw "HEIF/AVIF plug-in load or AVIF fixture decode failed: $LASTEXITCODE"
+            }
+          } finally {
+            Remove-Item $probe -Force -ErrorAction SilentlyContinue
+          }
+
+          $csv = Join-Path $env:RUNNER_TEMP "qv-avif-decode.csv"
+          $app = Start-Process -FilePath "$stage\QuickViewer.exe" -NoNewWindow -Wait -PassThru `
+            -ArgumentList @("--benchmark", "decode", "--runs", "1", "--warmup", "0",
+                            "--output", $csv, "tests\fileloader\data\avif\red.avif")
+          if ($app.ExitCode -ne 0) {
+            throw "QuickViewer could not decode the AVIF fixture (exit code $($app.ExitCode))"
+          }
+          $results = @(Import-Csv $csv)
+          if ($results.Count -eq 0 -or @($results | Where-Object { $_.success -ne "1" }).Count) {
+            throw "AVIF decode benchmark did not report successful decoding"
+          }
 
       - name: Package portable Windows x64 release
         shell: pwsh

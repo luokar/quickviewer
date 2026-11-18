@@ -327,7 +327,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" release-assets/QuickViewer-Windows-x64.zip \
             --repo "$GITHUB_REPOSITORY" \
             --title "QuickViewer Windows x64 ($GITHUB_REF_NAME)" \
-            --notes "Automated Windows x64 portable build from the nai62/quickviewer fork. Includes deployed Qt runtime; unzip and run QuickViewer.exe." \
+            --notes "Automated Windows x64 portable build from the nai62/quickviewer fork. Includes Qt runtime and release HEIF/HEIC/AVIF image-format plug-ins; unzip and run QuickViewer.exe." \
             --prerelease
 
   debug-build-and-tests:

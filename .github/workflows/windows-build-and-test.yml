@@ -2,6 +2,10 @@ name: Windows build and tests
 
 on:
   pull_request:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'build-*'
 
 permissions:
   contents: read
@@ -156,7 +160,51 @@ jobs:
           }
           Write-Host "The deployed application reached the first paint."
 
+      - name: Package portable Windows x64 release
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP "qv-runtime"
+          $archive = Join-Path $env:GITHUB_WORKSPACE "QuickViewer-Windows-x64.zip"
+          Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $archive -Force
+          if (-not (Test-Path $archive) -or (Get-Item $archive).Length -lt 1MB) {
+            throw "Portable release ZIP is missing or unexpectedly small"
+          }
+          Write-Host "Created $archive"
+
+      - name: Preserve release build for download
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuickViewer-Windows-x64
+          path: QuickViewer-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 90
+
+  publish-release:
+    name: Publish tagged Windows x64 prerelease
+    if: startsWith(github.ref, 'refs/tags/build-')
+    needs: release-build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download portable build
+        uses: actions/download-artifact@v4
+        with:
+          name: QuickViewer-Windows-x64
+          path: release-assets
+
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release-assets/QuickViewer-Windows-x64.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "QuickViewer Windows x64 ($GITHUB_REF_NAME)" \
+            --notes "Automated Windows x64 portable build from the nai62/quickviewer fork. Includes deployed Qt runtime; unzip and run QuickViewer.exe." \
+            --prerelease
+
   debug-build-and-tests:
+    if: github.event_name == 'pull_request'
     name: Debug build and tests (MSVC 2022)
     runs-on: windows-2022
     timeout-minutes: 30

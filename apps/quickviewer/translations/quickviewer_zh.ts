@@ -1830,6 +1830,11 @@
         <translation>将宽屏图像分为两页</translation>
     </message>
     <message>
+        <location filename="../src/mainwindow.ui" line="1159"/>
+        <source>Wrap next/prev page across volumes</source>
+        <translation>翻页时跨卷导航</translation>
+    </message>
+    <message>
         <location filename="../src/mainwindow.ui" line="1161"/>
         <source>Loupe</source>
         <translation>放大镜</translation>

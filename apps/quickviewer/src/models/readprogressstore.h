@@ -4,6 +4,8 @@
 #include <QtGui>
 #include <QtCore>
 #include <QtConcurrent>
+#include <QDir>
+#include <QFileInfo>
 
 #include "qvenums.h"
 
@@ -36,23 +38,41 @@ public:
 
     static ReadProgressMap initializeAsync();
 
+    /** Equivalent spellings of a filesystem volume share a reading position. */
+    static QString normalizedPath(const QString &path)
+    {
+        if (path.isEmpty()) {
+            return {};
+        }
+        QString normalized =
+            QDir::cleanPath(QFileInfo(QDir::fromNativeSeparators(path)).absoluteFilePath());
+#ifdef Q_OS_WIN
+        normalized = normalized.toCaseFolded();
+#endif
+        return normalized;
+    }
+
     bool contains(QString path)
     {
+        path = normalizedPath(path);
         return m_sessionOverrides.contains(path) || m_progressByVolumePath.contains(path);
     }
     ReadProgress at(QString path)
     {
+        path = normalizedPath(path);
         const auto sessionOverride = m_sessionOverrides.constFind(path);
         return sessionOverride == m_sessionOverrides.cend() ? m_progressByVolumePath[path]
                                                             : sessionOverride.value();
     }
     void insert(QString path, const ReadProgress &value)
     {
+        path = normalizedPath(path);
         m_progressByVolumePath.insert(path, value);
         emit progressChanged(path);
     }
     void insertSessionOverride(QString path, const ReadProgress &value)
     {
+        path = normalizedPath(path);
         m_sessionOverrides.insert(path, value);
         emit progressChanged(path);
     }

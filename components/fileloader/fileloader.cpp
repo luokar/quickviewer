@@ -1,6 +1,7 @@
 #include "fileloader.h"
 
 #include <algorithm>
+#include <QCollator>
 
 #include <QImageReader>
 
@@ -47,7 +48,22 @@ const QStringList &exifRawImageFormats()
 
 const QStringList &archiveFormats()
 {
-    static const QStringList formats{"zip", "7z", "rar", "cbr", "cbz"};
+    // Keep recognition in sync with the format aliases used by VolumeLoader.
+    // Without this list the loader can open an archive that Folder cannot
+    // display, bookmark or navigate to.
+    static const QStringList formats{"zip",
+                                     "7z",
+                                     "rar",
+                                     "cbr",
+                                     "cbz",
+                                     "cb7",
+                                     "tar",
+                                     "tar.gz",
+                                     "tar.bz2",
+                                     "tar.xz",
+                                     "tgz",
+                                     "tbz2",
+                                     "txz"};
     return formats;
 }
 
@@ -73,7 +89,9 @@ QByteArray IFileLoader::jpegQtFormatName()
 
 bool IFileLoader::isArchiveFile(QString path)
 {
-    return archiveFormats().contains(fileSuffix(path));
+    const QFileInfo info(path);
+    return archiveFormats().contains(info.suffix().toLower()) ||
+           archiveFormats().contains(info.completeSuffix().toLower());
 }
 
 bool IFileLoader::isExifJpegImageFile(QString path)
@@ -94,7 +112,17 @@ bool IFileLoader::isAnimatedImageFile(QString path)
 
 void IFileLoader::sortFiles(QStringList &filenames)
 {
-    std::sort(filenames.begin(), filenames.end(), caseInsensitiveLessThan);
+#ifdef Q_OS_WIN
+    std::stable_sort(filenames.begin(), filenames.end(), caseInsensitiveLessThan);
+#else
+    QCollator collator;
+    collator.setCaseSensitivity(Qt::CaseInsensitive);
+    collator.setNumericMode(true);
+    std::stable_sort(
+        filenames.begin(), filenames.end(), [&collator](const QString &left, const QString &right) {
+            return collator.compare(left, right) < 0;
+        });
+#endif
 }
 
 #ifdef Q_OS_WIN
@@ -106,7 +134,7 @@ bool IFileLoader::caseInsensitiveLessThan(const QString &s1, const QString &s2)
 #else
 bool IFileLoader::caseInsensitiveLessThan(const QString &s1, const QString &s2)
 {
-    return s1.toLower() < s2.toLower();
+    return s1.toCaseFolded() < s2.toCaseFolded();
 }
 #endif
 

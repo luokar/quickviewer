@@ -108,6 +108,7 @@ public slots:
     void handleFirstImageAsOneViewActionTriggered(bool checked);
     void handleDontEnlargeSmallImagesOnFittingActionTriggered(bool checked);
     void handleSeparatePagesWhenWideImageActionTriggered(bool checked);
+    void handleWrapPageNavigationAcrossVolumesActionTriggered(bool checked);
     void handleLoupeToolActionTriggered(bool checked);
     void handleScrollWithCursorWhenZoomingActionTriggered(bool checked);
     void handleShowFullscreenSignageActionTriggered(bool checked);

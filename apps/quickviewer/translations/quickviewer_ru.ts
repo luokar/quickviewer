@@ -1746,6 +1746,11 @@
         <translation>Разделить широкое изображение на 2 страницы</translation>
     </message>
     <message>
+        <location filename="../src/mainwindow.ui" line="1159"/>
+        <source>Wrap next/prev page across volumes</source>
+        <translation>Переходить к следующему/предыдущему тому при перелистывании</translation>
+    </message>
+    <message>
         <location filename="../src/mainwindow.ui" line="1161"/>
         <source>Loupe</source>
         <translation>Инструент Лупа</translation>

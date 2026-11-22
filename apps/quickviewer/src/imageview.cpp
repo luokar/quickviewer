@@ -560,10 +560,14 @@ void ImageView::handleNextPageActionTriggered()
 {
     if (qApp->SeparatePagesWhenWideImage() && m_renderedPages.advanceSeparatedPage()) {
         refreshRenderedPages();
+        if (isSlideShow()) {
+            toggleSlideShow();
+        }
         return;
     }
-    if (m_viewerSession) {
-        m_viewerSession->advanceSpread();
+    if (m_viewerSession && !m_viewerSession->advanceSpread() &&
+        qApp->WrapPageNavigationAcrossVolumes() && m_viewerSession->nextVolume()) {
+        m_viewerSession->firstPage();
     }
     if (isSlideShow()) {
         toggleSlideShow();
@@ -574,11 +578,15 @@ void ImageView::handlePrevPageActionTriggered()
 {
     if (qApp->SeparatePagesWhenWideImage() && m_renderedPages.rewindSeparatedPage()) {
         refreshRenderedPages();
+        if (isSlideShow()) {
+            toggleSlideShow();
+        }
         return;
     }
     m_openSeparatedPageFromEnd = true;
-    if (m_viewerSession) {
-        m_viewerSession->retreatSpread();
+    if (m_viewerSession && !m_viewerSession->retreatSpread() &&
+        qApp->WrapPageNavigationAcrossVolumes() && m_viewerSession->prevVolume()) {
+        m_viewerSession->lastPage();
     }
     if (isSlideShow()) {
         toggleSlideShow();
@@ -590,6 +598,9 @@ void ImageView::handleNextPageOrVolumeActionTriggered()
 {
     if (qApp->SeparatePagesWhenWideImage() && m_renderedPages.advanceSeparatedPage()) {
         refreshRenderedPages();
+        if (isSlideShow()) {
+            toggleSlideShow();
+        }
         return;
     }
     if (m_viewerSession) {
@@ -606,13 +617,18 @@ void ImageView::handlePrevPageOrVolumeActionTriggered()
 {
     if (qApp->SeparatePagesWhenWideImage() && m_renderedPages.rewindSeparatedPage()) {
         refreshRenderedPages();
+        if (isSlideShow()) {
+            toggleSlideShow();
+        }
         return;
     }
+    m_openSeparatedPageFromEnd = true;
     if (m_viewerSession) {
         if (!m_viewerSession->retreatSpread() && m_viewerSession->prevVolume()) {
             m_viewerSession->lastPage();
         }
     }
+    m_openSeparatedPageFromEnd = false;
     if (isSlideShow()) {
         toggleSlideShow();
     }
@@ -660,15 +676,21 @@ void ImageView::handleLastPageActionTriggered()
 
 void ImageView::handleNextOnePageActionTriggered()
 {
-    if (m_viewerSession) {
-        m_viewerSession->advanceOnePage();
+    if (m_viewerSession && !m_viewerSession->advanceOnePage() &&
+        qApp->WrapPageNavigationAcrossVolumes() && m_viewerSession->nextVolume()) {
+        m_viewerSession->firstPage();
     }
 }
 
 void ImageView::handlePrevOnePageActionTriggered()
 {
-    if (m_viewerSession) {
-        m_viewerSession->retreatOnePage();
+    if (m_viewerSession && !m_viewerSession->retreatOnePage() &&
+        qApp->WrapPageNavigationAcrossVolumes()) {
+        m_openSeparatedPageFromEnd = true;
+        if (m_viewerSession->prevVolume()) {
+            m_viewerSession->lastPage();
+        }
+        m_openSeparatedPageFromEnd = false;
     }
 }
 
@@ -972,6 +994,11 @@ void ImageView::handleSeparatePagesWhenWideImageActionTriggered(bool checked)
 {
     qApp->setSeparatePagesWhenWideImage(checked);
     refreshRenderedPages();
+}
+
+void ImageView::handleWrapPageNavigationAcrossVolumesActionTriggered(bool checked)
+{
+    qApp->setWrapPageNavigationAcrossVolumes(checked);
 }
 
 void ImageView::handleLoupeToolActionTriggered(bool checked)

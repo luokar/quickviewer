@@ -186,6 +186,7 @@ MainWindow::MainWindow(QWidget *parent)
     ui->actionWideImageAsOneView->setChecked(qApp->WideImageAsOnePageInDualView());
     ui->actionFirstImageAsOneView->setChecked(qApp->FirstImageAsOnePageInDualView());
     ui->actionSeparatePagesWhenWideImage->setChecked(qApp->SeparatePagesWhenWideImage());
+    ui->actionWrapPageNavigationAcrossVolumes->setChecked(qApp->WrapPageNavigationAcrossVolumes());
 
     ui->actionShowSubfolders->setChecked(qApp->ShowSubfolders());
     ui->actionConfirmImageRemoval->setChecked(qApp->ConfirmImageRemoval());
@@ -911,11 +912,9 @@ void MainWindow::openResolvedTarget(const OpenTarget &target)
                                  : QString();
     const QString requestedPath =
         QDir::fromNativeSeparators(isFileTarget ? filePath : location.containerPath);
-    const bool requestedArchive = IFileLoader::isArchiveFile(requestedPath);
     m_folderViewRequestedPath = requestedPath;
-    if (m_folderWindow && !requestedArchive) {
-        m_folderWindow->handleViewerSessionVolumeChanged(m_folderViewRequestedPath);
-    }
+    // Only content actually displayed by the viewer updates the Folder
+    // selection; a failed open should not select the requested item.
     if (isFileTarget) {
         m_viewerSession.openFileInContainer(filePath);
         // The folder view follows the viewer, but a folder it already shows
@@ -1382,7 +1381,7 @@ void MainWindow::updateFolderViewCurrentItem()
     }
     const QString path = m_viewerSession.isArchive() ? m_viewerSession.volumePath()
                                                      : m_viewerSession.currentPagePath();
-    if (!path.isEmpty()) {
+    if (!path.isEmpty() || !m_viewerSession.initialImagePaintPending()) {
         m_folderViewRequestedPath = path;
     }
     m_folderWindow->handleViewerSessionVolumeChanged(m_folderViewRequestedPath);
@@ -1390,6 +1389,18 @@ void MainWindow::updateFolderViewCurrentItem()
 
 bool MainWindow::changeFolderPath(QString path)
 {
+    // VolumeChanged may already have changed the Folder directory. Explicit
+    // opens must not enumerate that same directory a second time.
+    const QFileInfo requestedInfo(path);
+    if (m_folderWindow && requestedInfo.exists()) {
+        const QString effectivePath =
+            requestedInfo.isDir() ? requestedInfo.absoluteFilePath() : requestedInfo.absolutePath();
+        if (QDir::cleanPath(QDir::fromNativeSeparators(m_folderWindow->currentPath())) ==
+            QDir::cleanPath(QDir::fromNativeSeparators(effectivePath))) {
+            m_pendingFolderPath.clear();
+            return true;
+        }
+    }
     if (m_viewerSession.initialImagePaintPending()) {
         m_pendingFolderPath = path;
         return false;
@@ -1784,6 +1795,26 @@ void MainWindow::handleViewerSessionVolumeChanged(QString path)
 {
     updateRemovalActionTexts();
     if (!m_viewerSession.initialImagePaintPending()) {
+        if (!path.isEmpty()) {
+            // A page turn only moves the highlighted row; changing volumes
+            // may also change which directory the Folder panel must list.
+            // Archive pages are not individual files on disk, so the panel
+            // lists the archive's parent and highlights the archive itself.
+            const QString folderPath =
+                m_viewerSession.isArchive() ? QFileInfo(path).absolutePath() : path;
+            if (!m_folderWindow) {
+                // Navigation may happen before the panel is first shown (or
+                // while it is closed). Do not reopen it on the old volume.
+                m_pendingFolderPath = folderPath;
+            } else {
+                const auto normalizedPath = [](const QString &value) {
+                    return QDir::cleanPath(QDir::fromNativeSeparators(value));
+                };
+                if (normalizedPath(m_folderWindow->currentPath()) != normalizedPath(folderPath)) {
+                    m_folderWindow->setFolderPath(folderPath, false);
+                }
+            }
+        }
         updateFolderViewCurrentItem();
     }
     if (path.isEmpty()) {

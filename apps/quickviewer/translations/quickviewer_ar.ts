@@ -1746,6 +1746,11 @@
         <translation>قسم الصورة العريضة الى صفحتين</translation>
     </message>
     <message>
+        <location filename="../src/mainwindow.ui" line="1159"/>
+        <source>Wrap next/prev page across volumes</source>
+        <translation>الانتقال إلى المجلد التالي/السابق عند تقليب الصفحات</translation>
+    </message>
+    <message>
         <location filename="../src/mainwindow.ui" line="1161"/>
         <source>Loupe</source>
         <translation>اداة العدسة</translation>

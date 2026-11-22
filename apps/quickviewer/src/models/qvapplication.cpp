@@ -232,6 +232,9 @@ void QVApplication::registerActions(Ui::MainWindow *ui)
     m_keyActions.registerAction("actionNextOnePage", ui->actionNextOnePage, groupName);
     m_keyActions.registerAction("actionPrevOnePage", ui->actionPrevOnePage, groupName);
     m_keyActions.registerAction("actionSlideShow", ui->actionSlideShow, groupName);
+    m_keyActions.registerAction("actionWrapPageNavigationAcrossVolumes",
+                                ui->actionWrapPageNavigationAcrossVolumes,
+                                groupName);
 
     // Folder
     groupName = tr("Folder", "Folder Action Group");
@@ -425,6 +428,8 @@ void QVApplication::loadSettings()
     m_firstImageAsOnePageInDualView =
         m_settings->value("FirstImageAsOnePageInDualView", false).toBool();
     m_separatePagesWhenWideImage = m_settings->value("SeparatePagesWhenWideImage", false).toBool();
+    m_wrapPageNavigationAcrossVolumes =
+        m_settings->value("WrapPageNavigationAcrossVolumes", false).toBool();
 
     m_showToolBar = m_settings->value("ShowToolBar", true).toBool();
     m_showSliderBar = m_settings->value("ShowSliderBar", true).toBool();
@@ -616,7 +621,11 @@ void QVApplication::loadSettings()
     m_settings->endGroup();
     StartupProfiler::mark("application.theme-ready");
 
-    m_readProgressStore = new ReadProgressStore(this);
+    // Re-reading preferences must not delete the store that open Folder
+    // windows and ViewerSession already observe. Construct it only once.
+    if (!m_readProgressStore) {
+        m_readProgressStore = new ReadProgressStore(this);
+    }
 }
 
 void QVApplication::saveSettings()
@@ -642,6 +651,7 @@ void QVApplication::saveSettings()
     m_settings->setValue("WideImageAsOnePageInDualView", m_wideImageAsOnePageInDualView);
     m_settings->setValue("FirstImageAsOnePageInDualView", m_firstImageAsOnePageInDualView);
     m_settings->setValue("SeparatePagesWhenWideImage", m_separatePagesWhenWideImage);
+    m_settings->setValue("WrapPageNavigationAcrossVolumes", m_wrapPageNavigationAcrossVolumes);
 
     m_settings->setValue("ShowToolBar", m_showToolBar);
     m_settings->setValue("ShowSliderBar", m_showSliderBar);

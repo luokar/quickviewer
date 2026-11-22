@@ -207,6 +207,7 @@ SOURCES += \
     src/models/imagedecoder.cpp \
     src/models/jpegorientation.cpp \
     src/models/volumeloader.cpp \
+    src/models/volumenavigation.cpp \
     src/models/volumelocation.cpp \
     src/models/storedvolumelocation.cpp \
     src/qactionmanager/keyconfigdialog.cpp \
@@ -294,6 +295,7 @@ HEADERS  += \
     src/models/jpegorientation.h \
     src/models/decodemetricsscope.h \
     src/models/volumeloader.h \
+    src/models/volumenavigation.h \
     src/models/volumelocation.h \
     src/models/storedvolumelocation.h \
     src/qactionmanager/keyconfigdialog.h \

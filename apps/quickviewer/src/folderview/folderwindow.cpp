@@ -317,12 +317,18 @@ namespace {
 // natural collation as Volume::applyPageSort().
 bool nameLessThan(const QString &lhs, const QString &rhs)
 {
+#ifdef Q_OS_WIN
+    // Match the logical (numeric, case-insensitive) file order of the viewer.
+    return IFileLoader::caseInsensitiveLessThan(lhs, rhs);
+#else
     static const QCollator collator = [] {
         QCollator result;
+        result.setCaseSensitivity(Qt::CaseInsensitive);
         result.setNumericMode(true);
         return result;
     }();
     return collator.compare(lhs, rhs) < 0;
+#endif
 }
 
 bool sortDescending(qvEnums::ImageSortBy sortBy)
@@ -411,7 +417,7 @@ void FolderWindow::setFolderPath(QString path, bool showParent)
         m_volumes.clear();
         {
             QStringList subfolders =
-                dir.entryList(QDir::NoDotAndDotDot | QDir::Dirs, QDir::Unsorted);
+                dir.entryList(QDir::NoDotAndDotDot | QDir::Dirs | QDir::Hidden, QDir::Unsorted);
             for (const QString &sf : subfolders) {
                 QFileInfo fi(dir.absoluteFilePath(sf));
                 m_volumes << FolderItem(sf, FolderItem::Dir, fi.lastModified());
@@ -420,7 +426,7 @@ void FolderWindow::setFolderPath(QString path, bool showParent)
 
         {
             for (const QString &name :
-                 dir.entryList(QDir::NoDotAndDotDot | QDir::Files, QDir::Unsorted)) {
+                 dir.entryList(QDir::NoDotAndDotDot | QDir::Files | QDir::Hidden, QDir::Unsorted)) {
                 const bool isArchive = IFileLoader::isArchiveFile(name);
                 const bool isImage = IFileLoader::isImageFile(name);
                 if (!isArchive && !isImage) {
@@ -495,9 +501,9 @@ void FolderWindow::handleReadProgressChanged(QString path)
     if (!store) {
         return;
     }
-    const QString volume = QDir::fromNativeSeparators(path);
+    const QString volume = ReadProgressStore::normalizedPath(path);
     for (int row = 0; row < m_volumes.size(); ++row) {
-        if (volumePathOfRow(row) == volume) {
+        if (ReadProgressStore::normalizedPath(volumePathOfRow(row)) == volume) {
             // The volume being read is this row's, so its bar moves as the
             // reader advances: nothing else redraws a row the pointer is not
             // over.
@@ -556,7 +562,7 @@ void FolderWindow::sortVolumes()
     // this one-level list does not contain, so the orders only match for the
     // folder's own images.
     const qvEnums::ImageSortBy sortBy = qApp->ImageSortBy();
-    std::sort(
+    std::stable_sort(
         m_volumes.begin(), m_volumes.end(), [sortBy](const FolderItem &lhs, const FolderItem &rhs) {
             return folderViewLessThan(lhs, rhs, sortBy);
         });
@@ -583,7 +589,8 @@ namespace {
 bool sameEntryName(const QString &lhs, const QString &rhs)
 {
 #ifdef Q_OS_WIN
-    return lhs.compare(rhs, Qt::CaseInsensitive) == 0;
+    return lhs.normalized(QString::NormalizationForm_C)
+               .compare(rhs.normalized(QString::NormalizationForm_C), Qt::CaseInsensitive) == 0;
 #else
     return lhs == rhs;
 #endif
@@ -601,17 +608,29 @@ int FolderWindow::currentVolumeRow() const
     // represents the page is the file itself, or the folder containing it.
     const QString relative =
         QDir(m_currentPath).relativeFilePath(QDir::fromNativeSeparators(m_currentVolumePath));
-    if (relative.isEmpty() || QDir::isAbsolutePath(relative) ||
-        relative.startsWith(QStringLiteral(".."))) {
+    if (relative.isEmpty() || QDir::isAbsolutePath(relative) || relative == QStringLiteral("..") ||
+        relative.startsWith(QStringLiteral("../"))) {
         return -1;
     }
     const QString name = relative.section(QLatin1Char('/'), 0, 0);
+    // An exact name wins even on case-insensitive Windows filesystems; don't
+    // arbitrarily select one of two case-fold-equivalent entries.
     for (int row = 0; row < m_volumes.size(); ++row) {
-        if (sameEntryName(m_volumes[row].name, name)) {
+        if (m_volumes[row].name == name) {
             return row;
         }
     }
-    return -1;
+    int matchedRow = -1;
+    for (int row = 0; row < m_volumes.size(); ++row) {
+        if (!sameEntryName(m_volumes[row].name, name)) {
+            continue;
+        }
+        if (matchedRow >= 0) {
+            return -1;
+        }
+        matchedRow = row;
+    }
+    return matchedRow;
 }
 
 void FolderWindow::updateCurrentVolumeRow()
@@ -619,11 +638,18 @@ void FolderWindow::updateCurrentVolumeRow()
     const int row = currentVolumeRow();
     m_itemModel.setCurrentVolumeRow(row);
     if (row < 0) {
+        ui->folderView->setCurrentIndex(QModelIndex());
+        ui->folderView->clearSelection();
         return;
     }
     // Mark the entry the way a file page is marked: the delegate paints the
     // model role and the current index keeps keyboard navigation on the entry.
-    ui->folderView->setCurrentIndex(m_itemModel.index(row, 0));
+    const QModelIndex index = m_itemModel.index(row, 0);
+    ui->folderView->setCurrentIndex(index);
+    // Selection alone does not guarantee that an entry farther down a long
+    // directory list is on screen. Keep the active page/volume in view without
+    // emitting openRequested (which only comes from a user's click).
+    ui->folderView->scrollTo(index, QAbstractItemView::EnsureVisible);
 }
 
 void FolderWindow::handleHomeButtonClicked()

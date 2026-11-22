@@ -258,7 +258,10 @@ public slots:
     void handleSlideShowStopped();
 
 private:
-    bool openLocation(const VolumeLocation &location, bool coverOnly);
+    bool openLocation(const VolumeLocation &location,
+                      bool coverOnly,
+                      const CachedVolumeLoadResult *preloadedResult = nullptr);
+    bool openAdjacentVolume(int direction);
     void startInitialSpreadVolumeLoad(const QString &imagePath);
     void
     prepareInitialSpreadPages(VolumeHandle volume, int pageIndex, QVector<ImageContent> pages = {});
@@ -281,7 +284,6 @@ private:
     void setLoadReady(const QString &path, LoadTargetKind targetKind);
     int initialPageIndex(const VolumeHandle &volume, const QString &pageName, bool coverOnly);
     void replaceVisiblePages(QVector<ImageContent> pages);
-    static QStringList siblingVolumeNames(const QDir &directory);
 
     PageNavigator m_pageNavigator;
     struct SavedPagePosition
@@ -294,7 +296,6 @@ private:
 
     QVector<ImageContent> m_visiblePages;
     VolumeCache m_volumeCache;
-    QStringList m_volumeNames;
 
     ViewerState m_state;
     ViewerLoadStatus m_loadStatus;

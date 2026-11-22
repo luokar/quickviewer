@@ -235,15 +235,11 @@ void Volume::applyPageSort(qvEnums::ImageSortBy sortBy)
 {
     if (sortBy == qvEnums::ImageSortBy::SortByFileName ||
         sortBy == qvEnums::ImageSortBy::SortByFileNameDescending) {
-        QCollator collator;
-        collator.setNumericMode(true);
         const bool descending = sortBy == qvEnums::ImageSortBy::SortByFileNameDescending;
-        std::sort(m_pageNames.begin(),
-                  m_pageNames.end(),
-                  [&collator, descending](const QString &a, const QString &b) {
-                      const int order = collator.compare(a, b);
-                      return descending ? order > 0 : order < 0;
-                  });
+        IFileLoader::sortFiles(m_pageNames);
+        if (descending) {
+            std::reverse(m_pageNames.begin(), m_pageNames.end());
+        }
     } else {
         // The remaining sorts need attributes only the metadata list carries.
         // Sort that, then let the page list follow it, so every index keeps

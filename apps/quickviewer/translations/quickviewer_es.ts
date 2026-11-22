@@ -1830,6 +1830,11 @@
         <translation type="unfinished"></translation>
     </message>
     <message>
+        <location filename="../src/mainwindow.ui" line="1159"/>
+        <source>Wrap next/prev page across volumes</source>
+        <translation>Pasar al volumen siguiente/anterior al cambiar de página</translation>
+    </message>
+    <message>
         <location filename="../src/mainwindow.ui" line="1161"/>
         <source>Loupe</source>
         <translation type="unfinished"></translation>

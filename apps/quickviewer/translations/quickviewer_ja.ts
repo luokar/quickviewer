@@ -1832,6 +1832,11 @@
         <translation>横長の画像を2ページに分割する(縦画面のみ)</translation>
     </message>
     <message>
+        <location filename="../src/mainwindow.ui" line="1159"/>
+        <source>Wrap next/prev page across volumes</source>
+        <translation>ページ送り時に次/前の巻へ移動する</translation>
+    </message>
+    <message>
         <location filename="../src/mainwindow.ui" line="1161"/>
         <source>Loupe</source>
         <translation>拡大ツール</translation>

@@ -5,13 +5,17 @@
 #include "qvapplication.h"
 #include "shadereffect.h"
 #include "volumeloader.h"
+#include "volumenavigation.h"
 #include "startupprofiler.h"
 
 static VolumeCacheKey volumeCacheKey(const QString &volumePath)
 {
-    return {QDir::fromNativeSeparators(volumePath),
-            qApp->ShowSubfolders(),
-            qApp->ExtractSolidArchiveToTemporaryDir()};
+    QString normalized =
+        QDir::cleanPath(QFileInfo(QDir::fromNativeSeparators(volumePath)).absoluteFilePath());
+#ifdef Q_OS_WIN
+    normalized = normalized.toCaseFolded();
+#endif
+    return {normalized, qApp->ShowSubfolders(), qApp->ExtractSolidArchiveToTemporaryDir()};
 }
 
 static ImageContent waitForImageAt(const Volume &volume, int pageIndex)
@@ -234,7 +238,9 @@ bool ViewerSession::openEntry(const VolumeLocation &location, bool coverOnly)
         coverOnly);
 }
 
-bool ViewerSession::openLocation(const VolumeLocation &location, bool coverOnly)
+bool ViewerSession::openLocation(const VolumeLocation &location,
+                                 bool coverOnly,
+                                 const CachedVolumeLoadResult *preloadedResult)
 {
     StartupProfiler::mark("session.load-volume.begin");
     rememberActivePagePosition();
@@ -250,7 +256,8 @@ bool ViewerSession::openLocation(const VolumeLocation &location, bool coverOnly)
     m_volumeLoadDispatcher.invalidate();
     clearVisiblePages();
 
-    const CachedVolumeLoadResult loadResult = loadCachedVolume(location, coverOnly);
+    const CachedVolumeLoadResult loadResult =
+        preloadedResult ? *preloadedResult : loadCachedVolume(location, coverOnly);
     VolumeHandle loadedVolume = loadResult.volume;
     StartupProfiler::mark("session.volume-built");
     if (!loadedVolume) {
@@ -287,9 +294,6 @@ bool ViewerSession::openLocation(const VolumeLocation &location, bool coverOnly)
     }
     if (!coverOnly && volume->isArchive()) {
         deferFolderWorkUntilNextPaint();
-    }
-    if (!coverOnly) {
-        m_volumeNames = QStringList();
     }
     m_pageNavigator.reset();
     const int initialPage = initialPageIndex(loadedVolume, location.entryName, coverOnly);
@@ -483,7 +487,6 @@ void ViewerSession::prepareInitialSpreadPages(VolumeHandle volume,
     m_pageNavigator.reset();
     m_pageNavigator.selectPage(pageIndex, volume->pageCount());
     m_prefetchMode = PrefetchMode::Normal;
-    m_volumeNames.clear();
     setVolumeReady(volume);
     deferFolderWorkUntilNextPaint();
     const quint64 generation = m_initialDisplayGeneration;
@@ -683,113 +686,81 @@ void ViewerSession::handleSlideShowStopped()
 
 bool ViewerSession::nextVolume()
 {
-    Volume *volume = activeVolume();
-    if (!volume) {
-        return false;
-    }
-    QDir parentDirectory(volume->volumePath());
-    const QFileInfo fileInfo(volume->volumePath());
-    const QString currentVolumeName = fileInfo.fileName();
-    if (!parentDirectory.cdUp()) {
-        return false;
-    }
-    if (m_volumeNames.isEmpty()) {
-        m_volumeNames = siblingVolumeNames(parentDirectory);
-    }
-    bool beforeMatch = true;
-    bool loaded = false;
-    int preloadCount = 0;
-    for (const QString &volumeName : m_volumeNames) {
-        if (beforeMatch) {
-            if (volumeName == currentVolumeName) {
-                beforeMatch = false;
-            }
-            continue;
-        }
-        const QString volumePath = parentDirectory.filePath(volumeName);
-        if (preloadCount++ == 0) {
-            // Continue searching if the next volume cannot be loaded.
-            if (!openContainer(volumePath, true)) {
-                preloadCount = 0;
-            } else {
-                loaded = true;
-            }
-        } else {
-            prefetchVolume(volumePath);
-        }
-        // preloadCount <- MaxVolumesCache()
-        // 0            <- 1
-        // 0            <- 2
-        // 1            <- 3
-        // 1            <- 4
-        // 2            <- 5
-        // 3            <- 6
-        // 4            <- 7
-        // 4            <- 8
-        // 5            <- 9
-        // 6            <-10
-        if (preloadCount >= (qApp->MaxVolumesCache() - 1) * 2 / 3) {
-            break;
-        }
-    }
-    return loaded;
+    return openAdjacentVolume(1);
 }
 
 bool ViewerSession::prevVolume()
 {
+    return openAdjacentVolume(-1);
+}
+
+bool ViewerSession::openAdjacentVolume(int direction)
+{
     Volume *volume = activeVolume();
-    if (!volume) {
+    if (!volume || (direction != -1 && direction != 1)) {
         return false;
     }
-    QDir parentDirectory(volume->volumePath());
-    const QFileInfo fileInfo(volume->volumePath());
-    const QString currentVolumeName = fileInfo.fileName();
-    if (!parentDirectory.cdUp()) {
+
+    const auto navigation = VolumeNavigation::resolve(volume->volumePath());
+    if (!navigation) {
         return false;
     }
-    int matchCount = 0;
-    bool loaded = false;
-    if (m_volumeNames.isEmpty()) {
-        m_volumeNames = siblingVolumeNames(parentDirectory);
-    }
-    QListIterator<QString> volumeNameIterator(m_volumeNames);
-    volumeNameIterator.toBack();
-    bool beforeMatch = true;
-    while (volumeNameIterator.hasPrevious()) {
-        const QString volumeName = volumeNameIterator.previous();
-        if (beforeMatch) {
-            if (volumeName == currentVolumeName) {
-                beforeMatch = false;
-            }
+
+    // Count the first successfully opened candidate as one cached volume.
+    // Failed candidates do not consume this budget, even when the cache holds
+    // only one or two volumes.
+    const int preloadLimit = qMax(1, (qApp->MaxVolumesCache() - 1) * 2 / 3);
+    int preloadCount = 0;
+    QString lastFailedPath;
+    LoadTargetKind lastFailedKind = LoadTargetKind::Unknown;
+    LoadFailureReason lastFailure = LoadFailureReason::None;
+    for (int index = navigation->currentIndex + direction;
+         index >= 0 && index < navigation->siblingNames.size();
+         index += direction) {
+        const QString candidatePath =
+            QDir(navigation->parentPath).filePath(navigation->siblingNames.at(index));
+        if (!QFileInfo::exists(candidatePath)) {
             continue;
         }
-        const QString volumePath = parentDirectory.filePath(volumeName);
-        if (matchCount++ == 0) {
-            // Continue searching if the previous volume cannot be loaded.
-            if (!openContainer(volumePath, true)) {
-                matchCount = 0;
-            } else {
-                loaded = true;
+        if (preloadCount == 0) {
+            const VolumeLocation candidate{candidatePath, QString()};
+            const CachedVolumeLoadResult loaded = loadCachedVolume(candidate, true);
+            if (!loaded.volume) {
+                lastFailedPath = candidatePath;
+                lastFailedKind = targetKindForLocation(candidate);
+                lastFailure = failureReasonForArchiveError(loaded.error);
+                if (lastFailure == LoadFailureReason::None) {
+                    lastFailure = LoadFailureReason::NoViewableImages;
+                }
+                continue;
+            }
+            // A page list can exist even when its images are all corrupt.
+            // Do not switch away from the working volume to a blank cover.
+            const Volume::ImageLoadFuture cover = loaded.volume->imageLoadAt(0);
+            if (!cover.isValid() || !cover.result().isRenderable()) {
+                lastFailedPath = candidatePath;
+                lastFailedKind = targetKindForLocation(candidate);
+                lastFailure = LoadFailureReason::DecodeFailed;
+                m_volumeCache.invalidate(volumeCacheKey(candidatePath));
+                continue;
+            }
+            if (!openLocation(candidate, true, &loaded)) {
+                return false;
             }
         } else {
-            prefetchVolume(volumePath);
+            prefetchVolume(candidatePath);
         }
-        // preloadCount <- MaxVolumesCache()
-        // 0            <- 1
-        // 0            <- 2
-        // 1            <- 3
-        // 1            <- 4
-        // 2            <- 5
-        // 3            <- 6
-        // 4            <- 7
-        // 4            <- 8
-        // 5            <- 9
-        // 6            <-10
-        if (matchCount >= (qApp->MaxVolumesCache() - 1) * 2 / 3) {
+        ++preloadCount;
+        if (preloadCount >= preloadLimit) {
             break;
         }
     }
-    return loaded;
+    if (preloadCount == 0 && !lastFailedPath.isEmpty()) {
+        // Keep the current pages and Folder highlight, but tell the reader
+        // why the attempted foreground navigation could not open a volume.
+        setLoadFailure(lastFailedPath, lastFailedKind, lastFailure, false);
+    }
+    return preloadCount > 0;
 }
 
 void ViewerSession::reloadVolumeAfterImageRemoval()
@@ -835,7 +806,7 @@ ArchiveRemovalPlan ViewerSession::archiveRemovalPlan() const
     // The listing is read again: the one kept for volume navigation may be
     // older than the folder.
     const QDir directory = archive.absoluteDir();
-    const QStringList names = siblingVolumeNames(directory);
+    const QStringList names = VolumeNavigation::siblingNames(directory.absolutePath());
     const int index = names.indexOf(archive.fileName());
     if (index < 0) {
         return plan;
@@ -871,7 +842,6 @@ bool ViewerSession::releaseArchive(const ArchiveRemovalPlan &plan, int timeoutMi
     m_state = EmptyViewerState{};
     clearVisiblePages();
     m_volumeCache.invalidatePath(plan.archivePath);
-    m_volumeNames.clear();
 
     // The volume goes on the thread that owns it, and the page loads still
     // running hold the loader until they finish; both need the event loop.
@@ -886,7 +856,6 @@ bool ViewerSession::releaseArchive(const ArchiveRemovalPlan &plan, int timeoutMi
 
 bool ViewerSession::openVolumeAfterArchiveRemoval(const ArchiveRemovalPlan &plan)
 {
-    m_volumeNames.clear();
     for (const QString &path : plan.nextVolumePaths) {
         if (openContainer(path, true)) {
             return true;
@@ -1337,13 +1306,4 @@ QString ViewerSession::pageSignage(int pageIndex) const
         volumeLocationDisplayText({volume->volumePath(), m_visiblePages[pageIndex].path}),
         m_pageNavigator.currentPageIndex() + pageIndex,
         volume->pageCount());
-}
-
-QStringList ViewerSession::siblingVolumeNames(const QDir &directory)
-{
-    QStringList folders = directory.entryList(QDir::NoDotAndDotDot | QDir::Dirs, QDir::Name);
-    IFileLoader::sortFiles(folders);
-    QStringList archives = directory.entryList(QDir::NoDotAndDotDot | QDir::Files, QDir::Name);
-    IFileLoader::sortFiles(archives);
-    return folders + archives;
 }

@@ -51,6 +51,8 @@ class QVApplication : public QApplication
     Q_PROPERTY(bool ShowFullscreenSignage READ ShowFullscreenSignage WRITE setShowFullscreenSignage)
     Q_PROPERTY(
         bool DontShrinkForLargeImage READ DontShrinkForLargeImage WRITE setDontShrinkForLargeImage)
+    Q_PROPERTY(bool WrapPageNavigationAcrossVolumes READ WrapPageNavigationAcrossVolumes WRITE
+                   setWrapPageNavigationAcrossVolumes)
     //    Q_PROPERTY(bool ShowFullscreenTitleBar READ ShowFullscreenTitleBar WRITE setShowFullscreenTitleBar)
 
     // DualView
@@ -305,6 +307,11 @@ public:
     {
         m_separatePagesWhenWideImage = separatePagesWhenWideImage;
     }
+    bool WrapPageNavigationAcrossVolumes() const { return m_wrapPageNavigationAcrossVolumes; }
+    void setWrapPageNavigationAcrossVolumes(bool enabled)
+    {
+        m_wrapPageNavigationAcrossVolumes = enabled;
+    }
 
     // Show Bars
     bool ShowToolBar() { return m_showToolBar; }
@@ -532,6 +539,7 @@ private:
     bool m_topWindowWhenRunWithAssoc;
     bool m_topWindowWhenDropped;
     bool m_separatePagesWhenWideImage;
+    bool m_wrapPageNavigationAcrossVolumes = false;
     bool m_loupeTool;
     bool m_moveWindowByDraggingImage = false;
     QString m_titleTextFormat;

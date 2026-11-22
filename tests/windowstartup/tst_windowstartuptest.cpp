@@ -340,6 +340,7 @@ private slots:
         // setting a test depends on has to be set here.
         qApp->setShowSubfolders(false);
         qApp->setImageSortBy(qvEnums::ImageSortBy::SortByFileName);
+        qApp->setWrapPageNavigationAcrossVolumes(false);
     }
 
     void wheelActionUsesEventInput_data()
@@ -1703,6 +1704,71 @@ private slots:
         QCOMPARE(openVolumeSpy.size(), 0);
     }
 
+    void folderPanelClearsSelectionWhenViewerBecomesEmpty()
+    {
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        QVERIFY(QDir().mkpath(directory.filePath(QStringLiteral("Book1"))));
+        FolderWindow folder(nullptr, nullptr);
+        folder.setFolderPath(directory.path(), false);
+        QListView *view = folder.findChild<QListView *>(QStringLiteral("folderView"));
+        QVERIFY(view);
+        folder.handleViewerSessionVolumeChanged(directory.filePath(QStringLiteral("Book1")));
+        QVERIFY(view->currentIndex().isValid());
+        QVERIFY(view->currentIndex().data(FolderItemModel::CurrentVolumeRole).toBool());
+
+        folder.handleViewerSessionVolumeChanged(QString());
+        QVERIFY(!view->currentIndex().isValid());
+        QVERIFY(!view->model()->index(0, 0).data(FolderItemModel::CurrentVolumeRole).toBool());
+    }
+
+    void folderModelResetCannotSignalAnOldOutOfRangeSelection()
+    {
+        FolderItemModel model(nullptr);
+        QList<FolderItem> many;
+        for (int i = 0; i < 20; ++i) {
+            many << FolderItem(QStringLiteral("Book%1").arg(i), FolderItem::Dir, QDateTime());
+        }
+        QList<FolderItem> few{FolderItem(QStringLiteral("Only"), FolderItem::Dir, QDateTime())};
+        QAbstractItemModelTester tester(&model,
+                                        QAbstractItemModelTester::FailureReportingMode::QtTest);
+        model.setVolumes(&many);
+        model.setCurrentVolumeRow(19);
+        QVERIFY(model.index(19, 0).data(FolderItemModel::CurrentVolumeRole).toBool());
+
+        QSignalSpy changes(&model, &QAbstractItemModel::dataChanged);
+        model.setVolumes(&few);
+        model.setCurrentVolumeRow(0);
+        for (const QList<QVariant> &arguments : changes) {
+            const QModelIndex top = arguments.at(0).value<QModelIndex>();
+            const QModelIndex bottom = arguments.at(1).value<QModelIndex>();
+            QVERIFY(top.isValid());
+            QVERIFY(bottom.isValid());
+            QVERIFY(top.row() < model.rowCount({}));
+            QVERIFY(bottom.row() < model.rowCount({}));
+        }
+        QVERIFY(model.index(0, 0).data(FolderItemModel::CurrentVolumeRole).toBool());
+    }
+
+    void dotPrefixedFolderNamesDoNotLookLikeParentTraversal()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("The Unix hidden-file case uses dot-prefixed directory entries.");
+#else
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString hidden = directory.filePath(QStringLiteral("..chapter"));
+        QVERIFY(QDir().mkpath(hidden));
+        FolderWindow folder(nullptr, nullptr);
+        folder.setFolderPath(directory.path(), false);
+        QListView *view = folder.findChild<QListView *>(QStringLiteral("folderView"));
+        QVERIFY(view);
+        folder.handleViewerSessionVolumeChanged(hidden);
+        QCOMPARE(view->currentIndex().data().toString(), QStringLiteral("..chapter"));
+        QVERIFY(view->currentIndex().data(FolderItemModel::CurrentVolumeRole).toBool());
+#endif
+    }
+
     void folderViewHighlightsCurrentImageFile()
     {
         TestTemporaryDir directory;
@@ -1725,6 +1791,203 @@ private slots:
         const QModelIndex currentFile = view->model()->index(0, 0);
         QCOMPARE(currentFile.data().toString(), QStringLiteral("current.png"));
         QVERIFY(currentFile.data(FolderItemModel::CurrentVolumeRole).toBool());
+    }
+
+    void folderPanelFollowsNextAndPreviousDirectoryVolumes()
+    {
+        TestTemporaryDir root;
+        QVERIFY(root.isValid());
+        const QString first = root.filePath(QStringLiteral("Book1"));
+        const QString second = root.filePath(QStringLiteral("Book2"));
+        QVERIFY(QDir().mkpath(first));
+        QVERIFY(QDir().mkpath(second));
+        QImage image(16, 24, QImage::Format_RGB32);
+        image.fill(Qt::green);
+        QVERIFY(image.save(QDir(first).filePath(QStringLiteral("first.png"))));
+        QVERIFY(image.save(QDir(second).filePath(QStringLiteral("page1.png"))));
+        QVERIFY(image.save(QDir(second).filePath(QStringLiteral("page2.png"))));
+
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setDualView(false);
+        qApp->setWrapPageNavigationAcrossVolumes(true);
+        StartupWindow viewer;
+        viewer.openPath(first);
+        viewer.createFolderWindow(true, first, false);
+        FolderWindow *panel = viewer.folderWindow();
+        QVERIFY(panel);
+        QListView *list = panel->findChild<QListView *>(QStringLiteral("folderView"));
+        QVERIFY(list);
+        QSignalSpy opened(panel, &FolderWindow::openVolume);
+
+        // The ordinary page action crosses the boundary when the setting is
+        // enabled, and the resulting volume notification updates the panel.
+        viewer.imageView()->handleNextPageActionTriggered();
+        QCOMPARE(QFileInfo(viewer.viewerSession()->volumePath()).fileName(),
+                 QStringLiteral("Book2"));
+        QCOMPARE(QDir::cleanPath(panel->currentPath()), QDir::cleanPath(second));
+        QCOMPARE(list->model()->rowCount(), 2);
+        QCOMPARE(list->currentIndex().data().toString(), QStringLiteral("page1.png"));
+        QVERIFY(list->currentIndex().data(FolderItemModel::CurrentVolumeRole).toBool());
+        QCOMPARE(opened.size(), 0);
+
+        QVERIFY(viewer.viewerSession()->selectPage(1));
+        QCOMPARE(list->currentIndex().data().toString(), QStringLiteral("page2.png"));
+
+        // Page turns only change the active row, never re-enumerate the folder.
+        QVERIFY(image.save(QDir(second).filePath(QStringLiteral("not-yet-listed.png"))));
+        QVERIFY(viewer.viewerSession()->selectPage(0));
+        QCOMPARE(list->model()->rowCount(), 2);
+
+        viewer.imageView()->handlePrevPageActionTriggered();
+        QCOMPARE(QFileInfo(viewer.viewerSession()->volumePath()).fileName(),
+                 QStringLiteral("Book1"));
+        QCOMPARE(QDir::cleanPath(panel->currentPath()), QDir::cleanPath(first));
+        QCOMPARE(list->model()->rowCount(), 1);
+        QCOMPARE(list->currentIndex().data().toString(), QStringLiteral("first.png"));
+        QVERIFY(list->currentIndex().data(FolderItemModel::CurrentVolumeRole).toBool());
+        QCOMPARE(opened.size(), 0);
+
+        QVERIFY(!viewer.viewerSession()->prevVolume());
+        QCOMPARE(QDir::cleanPath(panel->currentPath()), QDir::cleanPath(first));
+        QCOMPARE(list->currentIndex().data().toString(), QStringLiteral("first.png"));
+    }
+
+    void openingFolderPanelAfterSwitchingVolumesShowsTheLatestVolume()
+    {
+        TestTemporaryDir root;
+        QVERIFY(root.isValid());
+        const QString first = root.filePath(QStringLiteral("Book1"));
+        const QString second = root.filePath(QStringLiteral("Book2"));
+        QVERIFY(QDir().mkpath(first));
+        QVERIFY(QDir().mkpath(second));
+        QImage image(16, 24, QImage::Format_RGB32);
+        image.fill(Qt::green);
+        QVERIFY(image.save(QDir(first).filePath(QStringLiteral("first.png"))));
+        QVERIFY(image.save(QDir(second).filePath(QStringLiteral("second.png"))));
+
+        qApp->setOpenVolumeWithProgress(false);
+        StartupWindow viewer;
+        viewer.openPath(first);
+        QVERIFY(!viewer.folderWindow());
+        QVERIFY(viewer.viewerSession()->nextVolume());
+        QCOMPARE(QFileInfo(viewer.viewerSession()->volumePath()).fileName(),
+                 QStringLiteral("Book2"));
+
+        viewer.createFolderWindow(true, QString(), false);
+        FolderWindow *panel = viewer.folderWindow();
+        QVERIFY(panel);
+        QCOMPARE(QDir::cleanPath(panel->currentPath()), QDir::cleanPath(second));
+        QListView *list = panel->findChild<QListView *>(QStringLiteral("folderView"));
+        QVERIFY(list);
+        QCOMPARE(list->currentIndex().data().toString(), QStringLiteral("second.png"));
+        QVERIFY(list->currentIndex().data(FolderItemModel::CurrentVolumeRole).toBool());
+    }
+
+    void folderPanelFollowsArchiveAndFolderVolumeTransitions()
+    {
+        TestTemporaryDir root;
+        QVERIFY(root.isValid());
+        const QString folder = root.filePath(QStringLiteral("Book1"));
+        const QString archive = root.filePath(QStringLiteral("Book2.7z"));
+        const QString nextArchive = root.filePath(QStringLiteral("Book3.7z"));
+        QVERIFY(QDir().mkpath(folder));
+        QImage image(16, 24, QImage::Format_RGB32);
+        image.fill(Qt::green);
+        QVERIFY(image.save(QDir(folder).filePath(QStringLiteral("page.png"))));
+        QVERIFY(QFile::copy(QString(FILELOADER_DATAPATH "7z/image.7z"), archive));
+        QVERIFY(QFile::copy(QString(FILELOADER_DATAPATH "7z/image.7z"), nextArchive));
+
+        qApp->setOpenVolumeWithProgress(false);
+        StartupWindow viewer;
+        viewer.openPath(folder);
+        viewer.createFolderWindow(true, folder, false);
+        FolderWindow *panel = viewer.folderWindow();
+        QVERIFY(panel);
+        QListView *list = panel->findChild<QListView *>(QStringLiteral("folderView"));
+        QVERIFY(list);
+        QSignalSpy opened(panel, &FolderWindow::openVolume);
+
+        QVERIFY(viewer.viewerSession()->nextVolume());
+        QCOMPARE(QDir::cleanPath(panel->currentPath()), QDir::cleanPath(root.path()));
+        QCOMPARE(list->currentIndex().data().toString(), QStringLiteral("Book2.7z"));
+        QVERIFY(list->currentIndex().data(FolderItemModel::CurrentVolumeRole).toBool());
+        QCOMPARE(list->model()->rowCount(), 3);
+
+        // Switching between archives in this same folder must retain the
+        // existing list, not refresh it or send an open request back to the viewer.
+        QVERIFY(QFile::copy(QString(FILELOADER_DATAPATH "7z/image.7z"),
+                            root.filePath(QStringLiteral("Book4.7z"))));
+        QVERIFY(viewer.viewerSession()->nextVolume());
+        QCOMPARE(QDir::cleanPath(panel->currentPath()), QDir::cleanPath(root.path()));
+        QCOMPARE(list->model()->rowCount(), 3);
+        QCOMPARE(list->currentIndex().data().toString(), QStringLiteral("Book3.7z"));
+        QVERIFY(list->currentIndex().data(FolderItemModel::CurrentVolumeRole).toBool());
+
+        QVERIFY(viewer.viewerSession()->prevVolume());
+        QCOMPARE(QDir::cleanPath(panel->currentPath()), QDir::cleanPath(root.path()));
+        QCOMPARE(list->currentIndex().data().toString(), QStringLiteral("Book2.7z"));
+        QVERIFY(viewer.viewerSession()->prevVolume());
+        QCOMPARE(QDir::cleanPath(panel->currentPath()), QDir::cleanPath(folder));
+        QCOMPARE(list->currentIndex().data().toString(), QStringLiteral("page.png"));
+        QCOMPARE(opened.size(), 0);
+    }
+
+    void folderPanelDoesNotMoveWhenAdjacentVolumeCannotBeOpened()
+    {
+        TestTemporaryDir root;
+        QVERIFY(root.isValid());
+        const QString folder = root.filePath(QStringLiteral("Book1"));
+        QVERIFY(QDir().mkpath(folder));
+        QImage image(16, 24, QImage::Format_RGB32);
+        image.fill(Qt::green);
+        QVERIFY(image.save(QDir(folder).filePath(QStringLiteral("page.png"))));
+        QVERIFY(QDir().mkpath(root.filePath(QStringLiteral("Book2"))));
+        QFile damagedArchive(root.filePath(QStringLiteral("Book3.zip")));
+        QVERIFY(damagedArchive.open(QIODevice::WriteOnly));
+        damagedArchive.write("not an archive");
+        damagedArchive.close();
+
+        qApp->setOpenVolumeWithProgress(false);
+        StartupWindow viewer;
+        viewer.openPath(folder);
+        viewer.createFolderWindow(true, folder, false);
+        FolderWindow *panel = viewer.folderWindow();
+        QVERIFY(panel);
+        QListView *list = panel->findChild<QListView *>(QStringLiteral("folderView"));
+        QVERIFY(list);
+        QSignalSpy opened(panel, &FolderWindow::openVolume);
+
+        QVERIFY(!viewer.viewerSession()->nextVolume());
+        QCOMPARE(QDir::cleanPath(panel->currentPath()), QDir::cleanPath(folder));
+        QCOMPARE(list->model()->rowCount(), 1);
+        QCOMPARE(list->currentIndex().data().toString(), QStringLiteral("page.png"));
+        QVERIFY(list->currentIndex().data(FolderItemModel::CurrentVolumeRole).toBool());
+        QCOMPARE(opened.size(), 0);
+    }
+
+    void folderPanelScrollsSelectedVolumeIntoViewWithoutOpeningIt()
+    {
+        TestTemporaryDir root;
+        QVERIFY(root.isValid());
+        for (int number = 1; number <= 40; ++number) {
+            QVERIFY(QDir().mkpath(root.filePath(QStringLiteral("Book%1").arg(number))));
+        }
+
+        FolderWindow panel(nullptr, nullptr);
+        panel.resize(320, 240);
+        panel.setFolderPath(root.path(), false);
+        panel.show();
+        QCoreApplication::processEvents();
+        QListView *list = panel.findChild<QListView *>(QStringLiteral("folderView"));
+        QVERIFY(list);
+        QCOMPARE(list->model()->rowCount(), 40);
+        QSignalSpy opened(&panel, &FolderWindow::openVolume);
+
+        panel.handleViewerSessionVolumeChanged(root.filePath(QStringLiteral("Book40")));
+        QCOMPARE(list->currentIndex().data().toString(), QStringLiteral("Book40"));
+        QVERIFY(list->currentIndex().data(FolderItemModel::CurrentVolumeRole).toBool());
+        QTRY_VERIFY(list->viewport()->rect().intersects(list->visualRect(list->currentIndex())));
+        QCOMPARE(opened.size(), 0);
     }
 
     void folderViewHighlightsTheUnwrappedSubdirectory()
@@ -3676,6 +3939,45 @@ private slots:
         QCOMPARE(view->model()->rowCount(), 1);
         folder->handleReloadButtonClicked();
         QCOMPARE(view->model()->rowCount(), 2);
+    }
+
+    void explicitlyOpeningAShownDirectoryDoesNotRescanTheFolderPanel()
+    {
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        QImage image(16, 24, QImage::Format_RGB32);
+        image.fill(Qt::green);
+        QVERIFY(image.save(directory.filePath(QStringLiteral("01.bmp"))));
+        StartupWindow viewer;
+        viewer.createFolderWindow(true, directory.path(), false);
+        QListView *view =
+            viewer.folderWindow()->findChild<QListView *>(QStringLiteral("folderView"));
+        QVERIFY(view);
+        QCOMPARE(view->model()->rowCount(), 1);
+        QVERIFY(image.save(directory.filePath(QStringLiteral("02.bmp"))));
+
+        viewer.openPath(directory.path());
+        QCOMPARE(view->model()->rowCount(), 1);
+        viewer.folderWindow()->handleReloadButtonClicked();
+        QCOMPARE(view->model()->rowCount(), 2);
+    }
+
+    void folderListsArchiveFormatsRecognizedByTheVolumeLoader()
+    {
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        for (const QString &name : {QStringLiteral("Book1.cb7"), QStringLiteral("Book2.tar.gz")}) {
+            QFile archive(directory.filePath(name));
+            QVERIFY(archive.open(QIODevice::WriteOnly));
+        }
+        FolderWindow folder(nullptr, nullptr);
+        folder.setFolderPath(directory.path(), false);
+        QListView *view = folder.findChild<QListView *>(QStringLiteral("folderView"));
+        QVERIFY(view);
+        QCOMPARE(view->model()->rowCount(), 2);
+        folder.handleViewerSessionVolumeChanged(directory.filePath(QStringLiteral("Book2.tar.gz")));
+        QCOMPARE(view->currentIndex().data().toString(), QStringLiteral("Book2.tar.gz"));
+        QVERIFY(view->currentIndex().data(FolderItemModel::CurrentVolumeRole).toBool());
     }
 
     void reloadButtonRequestsAContainerReload()

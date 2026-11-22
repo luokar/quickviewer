@@ -226,6 +226,9 @@ void FolderItemModel::setVolumes(QList<FolderItem> *volumes)
         return;
     }
     emit beginResetModel();
+    // Old row numbers do not identify items in the new list. In particular,
+    // never emit dataChanged for an out-of-range old row after the reset.
+    m_currentVolumeRow = -1;
     m_searchedVolumes = volumes;
     // A listing carries no progress of its own: the panel fills it in from the
     // store once the rows are known.
@@ -335,7 +338,7 @@ void FolderItemModel::setCurrentVolumeRow(int row)
 
     const int previousRow = m_currentVolumeRow;
     m_currentVolumeRow = row;
-    if (previousRow >= 0) {
+    if (previousRow >= 0 && previousRow < rowCount({})) {
         emit dataChanged(index(previousRow, 0), index(previousRow, 0), {CurrentVolumeRole});
     }
     if (m_currentVolumeRow >= 0) {

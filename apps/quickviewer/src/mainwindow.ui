@@ -360,6 +360,8 @@
     <addaction name="actionNextOnePage"/>
     <addaction name="actionPrevOnePage"/>
     <addaction name="separator"/>
+    <addaction name="actionWrapPageNavigationAcrossVolumes"/>
+    <addaction name="separator"/>
     <addaction name="actionSaveBookmark"/>
     <addaction name="actionLoadBookmark"/>
     <addaction name="separator"/>
@@ -1149,6 +1151,14 @@
     <string extracomment="Flag to display images on the left and right sides with a portrait display">Split wide images into two pages</string>
    </property>
   </action>
+  <action name="actionWrapPageNavigationAcrossVolumes">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Wrap next/prev page across volumes</string>
+   </property>
+  </action>
   <action name="actionLoupeTool">
    <property name="checkable">
     <bool>true</bool>
@@ -1365,6 +1375,7 @@
     <slot>handleRotateActionTriggered()</slot>
     <slot>handleDontEnlargeSmallImagesOnFittingActionTriggered(bool)</slot>
     <slot>handleSeparatePagesWhenWideImageActionTriggered(bool)</slot>
+    <slot>handleWrapPageNavigationAcrossVolumesActionTriggered(bool)</slot>
     <slot>handleLoupeToolActionTriggered(bool)</slot>
     <slot>handleScrollWithCursorWhenZoomingActionTriggered(bool)</slot>
     <slot>handleShowFullscreenSignageActionTriggered(bool)</slot>
@@ -2649,6 +2660,22 @@
    <signal>triggered(bool)</signal>
    <receiver>graphicsView</receiver>
    <slot>handleSeparatePagesWhenWideImageActionTriggered(bool)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>-1</x>
+     <y>-1</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>392</x>
+     <y>293</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>actionWrapPageNavigationAcrossVolumes</sender>
+   <signal>triggered(bool)</signal>
+   <receiver>graphicsView</receiver>
+   <slot>handleWrapPageNavigationAcrossVolumesActionTriggered(bool)</slot>
    <hints>
     <hint type="sourcelabel">
      <x>-1</x>

@@ -26,6 +26,7 @@
 #include "models/volumecache.h"
 #include "models/volumehandle.h"
 #include "models/volume.h"
+#include "models/volumenavigation.h"
 #include "qzimg.h"
 
 #define FILELOADER_DATAPATH VIEWERNAVIGATION_SRCDIR "../fileloader/data/"
@@ -299,6 +300,14 @@ public:
         const int pageIndex = name.section('-', 1, 1).section('.', 0, 0).toInt();
         return quint64(100 - pageIndex);
     }
+};
+
+class ArchiveMemoryFileLoader final : public MemoryFileLoader
+{
+public:
+    using MemoryFileLoader::MemoryFileLoader;
+
+    bool isArchive() const override { return true; }
 };
 
 /**
@@ -591,6 +600,23 @@ static bool writeArchiveShelf(const QString &root, const QStringList &archiveNam
     return QDir().mkpath(folder) && image.save(QDir(folder).filePath("page.bmp"));
 }
 
+static bool writeImageVolume(const QString &path,
+                             const QStringList &pageNames,
+                             const QSize &imageSize = QSize(16, 24))
+{
+    if (!QDir().mkpath(path)) {
+        return false;
+    }
+    for (int index = 0; index < pageNames.size(); ++index) {
+        QImage image(imageSize, QImage::Format_RGB32);
+        image.fill(QColor::fromHsv((index * 60) % 360, 255, 255));
+        if (!image.save(QDir(path).filePath(pageNames.at(index)))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 class ViewerNavigationTest : public QObject
 {
     Q_OBJECT
@@ -723,6 +749,9 @@ private slots:
         qApp->setSeparatePagesWhenWideImage(true);
         qApp->setDualView(false);
         qApp->setFitting(true);
+        qApp->setShowSubfolders(false);
+        qApp->setWrapPageNavigationAcrossVolumes(false);
+        qApp->setImageSortBy(qvEnums::ImageSortBy::SortByFileName);
         // The suites share the settings file next to their binaries, so every
         // setting a test depends on has to be set here.
         qApp->setShowSubfolders(false);
@@ -1519,6 +1548,265 @@ private slots:
         QCOMPARE(session.currentPageStatusText(), QString());
         QCOMPARE(session.pageSignage(0), QString());
         QCOMPARE(session.pageSignage(-1), QString());
+    }
+
+    void volumeNavigationMatchesExactNamesBeforeCompatibleNames()
+    {
+        const QStringList caseVariants{QStringLiteral("BOOK2"), QStringLiteral("Book2")};
+        const auto exact = VolumeNavigation::indexOf(caseVariants, QStringLiteral("Book2"));
+        QVERIFY(exact);
+        QCOMPARE(*exact, 1);
+
+        const auto folded =
+            VolumeNavigation::indexOf({QStringLiteral("BOOK2")}, QStringLiteral("book2"));
+        QVERIFY(folded);
+        QCOMPARE(*folded, 0);
+
+        // When no exact spelling identifies the opened volume, two
+        // case-fold-equivalent candidates are ambiguous rather than arbitrary.
+        QVERIFY(!VolumeNavigation::indexOf(caseVariants, QStringLiteral("book2")));
+    }
+
+    void volumeNavigationMatchesUnicodeNfcOnlyWhenUnique()
+    {
+        const QString composed = QString::fromUtf8("Caf\xC3\xA9");
+        const QString decomposed = QString::fromUtf8("Cafe\xCC\x81");
+
+        const auto equivalent = VolumeNavigation::indexOf({composed}, decomposed);
+        QVERIFY(equivalent);
+        QCOMPARE(*equivalent, 0);
+
+        // An exact spelling still wins even when another name has the same
+        // normalized representation.
+        const auto exact = VolumeNavigation::indexOf({composed, decomposed}, composed);
+        QVERIFY(exact);
+        QCOMPARE(*exact, 0);
+
+        const QString uppercase = QString::fromUtf8("CAF\xC3\x89");
+        QVERIFY(!VolumeNavigation::indexOf({composed, decomposed}, uppercase));
+    }
+
+    void siblingVolumeNamesGroupDirectoriesBeforeNaturallySortedFiles()
+    {
+        const auto previousSort = qApp->ImageSortBy();
+        const auto restoreSort =
+            qScopeGuard([previousSort] { qApp->setImageSortBy(previousSort); });
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        QVERIFY(QDir().mkpath(directory.filePath(QStringLiteral("Volume2"))));
+        QVERIFY(QDir().mkpath(directory.filePath(QStringLiteral("Volume10"))));
+        for (const QString &name :
+             {QStringLiteral("Volume1.cbz"), QStringLiteral("Volume20.cbz")}) {
+            QFile file(directory.filePath(name));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+        }
+        QFile cover(directory.filePath(QStringLiteral("Volume3.png")));
+        QVERIFY(cover.open(QIODevice::WriteOnly));
+        cover.close();
+        QFile note(directory.filePath(QStringLiteral("Volume4.txt")));
+        QVERIFY(note.open(QIODevice::WriteOnly));
+        note.close();
+
+        const QStringList expected{QStringLiteral("Volume2"),
+                                   QStringLiteral("Volume10"),
+                                   QStringLiteral("Volume1.cbz"),
+                                   QStringLiteral("Volume20.cbz")};
+        qApp->setImageSortBy(qvEnums::ImageSortBy::SortByFileSize);
+        QCOMPARE(VolumeNavigation::siblingNames(directory.path()), expected);
+        qApp->setImageSortBy(qvEnums::ImageSortBy::SortByModifiedTime);
+        QCOMPARE(VolumeNavigation::siblingNames(directory.path()), expected);
+    }
+
+    void volumeNavigationOnlyEnumeratesDirectoriesAndRecognizedArchives()
+    {
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        QVERIFY(QDir().mkpath(directory.filePath(QStringLiteral("Book1"))));
+        for (const QString &name : {QStringLiteral("Book2.jpg"),
+                                    QStringLiteral("Book3.txt"),
+                                    QStringLiteral("Book4.cb7"),
+                                    QStringLiteral("Book5.tar.gz")}) {
+            QFile file(directory.filePath(name));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+        }
+        QCOMPARE(VolumeNavigation::siblingNames(directory.path()),
+                 QStringList({QStringLiteral("Book1"),
+                              QStringLiteral("Book4.cb7"),
+                              QStringLiteral("Book5.tar.gz")}));
+        QVERIFY(IFileLoader::isArchiveFile(QStringLiteral("Book4.cb7")));
+        QVERIFY(IFileLoader::isArchiveFile(QStringLiteral("Book5.tar.gz")));
+        QVERIFY(!IFileLoader::isArchiveFile(QStringLiteral("Book2.jpg")));
+    }
+
+    void adjacentVolumeNavigationNeverTreatsSingleImagesAsVolumes()
+    {
+        const bool oldProgress = qApp->OpenVolumeWithProgress();
+        const auto restore = qScopeGuard([&] { qApp->setOpenVolumeWithProgress(oldProgress); });
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setDualView(false);
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString first = directory.filePath(QStringLiteral("Book1"));
+        QVERIFY(writeImageVolume(first, {QStringLiteral("01.png")}));
+        QImage image(16, 24, QImage::Format_RGB32);
+        image.fill(Qt::green);
+        QVERIFY(image.save(directory.filePath(QStringLiteral("Book2.png"))));
+
+        ViewerSession session(nullptr);
+        QVERIFY(session.openContainer(first));
+        QVERIFY(!session.nextVolume());
+        QCOMPARE(QDir::cleanPath(session.volumePath()), QDir::cleanPath(first));
+    }
+
+    void volumeNavigationResolvesPathsWithTrailingSeparators()
+    {
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString series = directory.filePath(QStringLiteral("Series"));
+        const QString volume2 = QDir(series).filePath(QStringLiteral("Volume2"));
+        const QString volume10 = QDir(series).filePath(QStringLiteral("Volume10"));
+        QVERIFY(QDir().mkpath(volume2));
+        QVERIFY(QDir().mkpath(volume10));
+
+        const auto refreshed = VolumeNavigation::resolve(volume2 + QDir::separator());
+        QVERIFY(refreshed);
+        QCOMPARE(
+            refreshed->parentPath,
+            QDir::cleanPath(QDir::fromNativeSeparators(QFileInfo(series).canonicalFilePath())));
+        QCOMPARE(refreshed->siblingNames,
+                 QStringList({QStringLiteral("Volume2"), QStringLiteral("Volume10")}));
+        QCOMPARE(refreshed->currentIndex, 0);
+
+        const auto missing = VolumeNavigation::resolve(directory.filePath("missing"));
+        QVERIFY(!missing);
+    }
+
+    void volumeNavigationUsesTheLogicalParentOfASymlink()
+    {
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString series = directory.filePath(QStringLiteral("Series"));
+        const QString volume2 = QDir(series).filePath(QStringLiteral("Volume2"));
+        const QString volume10 = QDir(series).filePath(QStringLiteral("Volume10"));
+        const QString aliasDirectory = directory.filePath(QStringLiteral("Alias"));
+        QVERIFY(QDir().mkpath(volume2));
+        QVERIFY(QDir().mkpath(volume10));
+        QVERIFY(QDir().mkpath(aliasDirectory));
+        const QString alias = QDir(aliasDirectory).filePath(QStringLiteral("Volume2"));
+        QVERIFY(QDir().mkpath(QDir(aliasDirectory).filePath(QStringLiteral("Volume3"))));
+        if (!QFile::link(volume2, alias)) {
+            QSKIP("This filesystem cannot create a directory symbolic link.");
+        }
+        if (!QFileInfo(alias).isSymLink()) {
+            QSKIP("This platform creates shortcuts rather than symbolic links.");
+        }
+
+        const auto navigation = VolumeNavigation::resolve(alias);
+        QVERIFY(navigation);
+        QCOMPARE(navigation->parentPath,
+                 QDir::cleanPath(
+                     QDir::fromNativeSeparators(QFileInfo(aliasDirectory).absoluteFilePath())));
+        QCOMPARE(navigation->siblingNames,
+                 QStringList({QStringLiteral("Volume2"), QStringLiteral("Volume3")}));
+    }
+
+    void volumeNavigationRefreshesCachedNamesEvenWhenCurrentVolumeStillMatches()
+    {
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString book1 = directory.filePath(QStringLiteral("Book1"));
+        QVERIFY(QDir().mkpath(book1));
+        QVERIFY(QDir().mkpath(directory.filePath(QStringLiteral("Book3"))));
+        const QStringList stale = VolumeNavigation::siblingNames(directory.path());
+        QCOMPARE(stale, QStringList({QStringLiteral("Book1"), QStringLiteral("Book3")}));
+        QVERIFY(QDir().mkpath(directory.filePath(QStringLiteral("Book2"))));
+
+        const auto refreshed = VolumeNavigation::resolve(book1);
+        QVERIFY(refreshed);
+        QCOMPARE(refreshed->siblingNames,
+                 QStringList(
+                     {QStringLiteral("Book1"), QStringLiteral("Book2"), QStringLiteral("Book3")}));
+        QCOMPARE(refreshed->currentIndex, 0);
+    }
+
+    void hiddenAndDotPrefixedVolumesAreNavigable()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("Windows hidden attributes require Win32 filesystem setup.");
+#else
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString hidden = directory.filePath(QStringLiteral("..chapter"));
+        const QString visible = directory.filePath(QStringLiteral("Book2"));
+        QVERIFY(QDir().mkpath(hidden));
+        QVERIFY(QDir().mkpath(visible));
+        const QStringList names = VolumeNavigation::siblingNames(directory.path());
+        QVERIFY(names.contains(QStringLiteral("..chapter")));
+        QVERIFY(names.contains(QStringLiteral("Book2")));
+        const auto navigation = VolumeNavigation::resolve(hidden);
+        QVERIFY(navigation);
+        QCOMPARE(navigation->siblingNames.at(navigation->currentIndex),
+                 QStringLiteral("..chapter"));
+#endif
+    }
+
+    void filenameSortingUsesNaturalOrderForFoldersAndArchives()
+    {
+        const qvEnums::ImageSortBy previousSort = qApp->ImageSortBy();
+        const auto restoreSort =
+            qScopeGuard([previousSort] { qApp->setImageSortBy(previousSort); });
+        qApp->setImageSortBy(qvEnums::ImageSortBy::SortByFileName);
+
+        const auto addPages = [](MemoryFileLoader &loader) {
+            loader.addFile(QStringLiteral("page10.png"), encodedStillPng(QSize(8, 8), Qt::red));
+            loader.addFile(QStringLiteral("Page2.png"), encodedStillPng(QSize(8, 8), Qt::green));
+            loader.addFile(QStringLiteral("page1.png"), encodedStillPng(QSize(8, 8), Qt::blue));
+        };
+        const QStringList expected{
+            QStringLiteral("page1.png"), QStringLiteral("Page2.png"), QStringLiteral("page10.png")};
+
+        auto folderLoader = std::make_unique<MemoryFileLoader>(0);
+        addPages(*folderLoader);
+        Volume folderVolume(nullptr, std::move(folderLoader));
+        folderVolume.loadPageList();
+        QStringList folderNames;
+        for (int index = 0; index < folderVolume.pageCount(); ++index) {
+            folderNames << folderVolume.pageNameAt(index);
+        }
+        QCOMPARE(folderNames, expected);
+
+        auto archiveLoader = std::make_unique<ArchiveMemoryFileLoader>(0);
+        addPages(*archiveLoader);
+        Volume archiveVolume(nullptr, std::move(archiveLoader));
+        archiveVolume.loadPageList();
+        QStringList archiveNames;
+        for (int index = 0; index < archiveVolume.pageCount(); ++index) {
+            archiveNames << archiveVolume.pageNameAt(index);
+        }
+        QCOMPARE(archiveNames, expected);
+
+        qApp->setImageSortBy(qvEnums::ImageSortBy::SortByFileNameDescending);
+        const QStringList descendingExpected{
+            QStringLiteral("page10.png"), QStringLiteral("Page2.png"), QStringLiteral("page1.png")};
+        auto descendingFolderLoader = std::make_unique<MemoryFileLoader>(0);
+        addPages(*descendingFolderLoader);
+        Volume descendingFolder(nullptr, std::move(descendingFolderLoader));
+        descendingFolder.loadPageList();
+        QStringList descendingFolderNames;
+        for (int index = 0; index < descendingFolder.pageCount(); ++index) {
+            descendingFolderNames << descendingFolder.pageNameAt(index);
+        }
+        QCOMPARE(descendingFolderNames, descendingExpected);
+
+        auto descendingArchiveLoader = std::make_unique<ArchiveMemoryFileLoader>(0);
+        addPages(*descendingArchiveLoader);
+        Volume descendingArchive(nullptr, std::move(descendingArchiveLoader));
+        descendingArchive.loadPageList();
+        QStringList descendingArchiveNames;
+        for (int index = 0; index < descendingArchive.pageCount(); ++index) {
+            descendingArchiveNames << descendingArchive.pageNameAt(index);
+        }
+        QCOMPARE(descendingArchiveNames, descendingExpected);
     }
 
     void pageNavigatorOwnsValidatedPagePosition()
@@ -2436,6 +2724,323 @@ private slots:
         QVERIFY(session.openContainer(secondVolumePath));
         QCOMPARE(session.currentPageIndex(), 1);
         QCOMPARE(session.currentPageName(), QString("page-1.bmp"));
+    }
+
+    void directDirectoryNavigationNormalizesTrailingSlashAndImagePaths()
+    {
+        const int previousCacheSize = qApp->MaxVolumesCache();
+        const bool previousOpenProgress = qApp->OpenVolumeWithProgress();
+        const auto previousSort = qApp->ImageSortBy();
+        const auto restore = qScopeGuard([&] {
+            qApp->setMaxVolumesCache(previousCacheSize);
+            qApp->setOpenVolumeWithProgress(previousOpenProgress);
+            qApp->setImageSortBy(previousSort);
+        });
+        qApp->setMaxVolumesCache(5);
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setImageSortBy(qvEnums::ImageSortBy::SortByFileName);
+        qApp->setDualView(false);
+
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString series = directory.filePath(QStringLiteral("Series"));
+        const QString volume1 = QDir(series).filePath(QStringLiteral("Volume1"));
+        const QString volume2 = QDir(series).filePath(QStringLiteral("Volume2"));
+        const QString volume10 = QDir(series).filePath(QStringLiteral("Volume10"));
+        const QStringList pages{
+            QStringLiteral("page1.png"), QStringLiteral("page2.png"), QStringLiteral("page10.png")};
+        QVERIFY(writeImageVolume(volume1, pages));
+        QVERIFY(writeImageVolume(volume2, pages));
+        QVERIFY(writeImageVolume(volume10, pages));
+
+        for (const QString &path : {volume2, volume2 + QDir::separator()}) {
+            ViewerSession nextSession(nullptr);
+            QVERIFY(nextSession.openContainer(path));
+            QVERIFY(nextSession.nextVolume());
+            QCOMPARE(QFileInfo(nextSession.volumePath()).fileName(), QStringLiteral("Volume10"));
+            QCOMPARE(nextSession.currentPageIndex(), 0);
+
+            ViewerSession previousSession(nullptr);
+            QVERIFY(previousSession.openContainer(path));
+            QVERIFY(previousSession.prevVolume());
+            QCOMPARE(QFileInfo(previousSession.volumePath()).fileName(), QStringLiteral("Volume1"));
+            QCOMPARE(previousSession.currentPageIndex(), 0);
+        }
+
+        const QString selectedPage = QDir(volume2).filePath(QStringLiteral("page2.png"));
+        ViewerSession nextFromImage(nullptr);
+        QVERIFY(nextFromImage.openFileInContainer(selectedPage));
+        QTRY_COMPARE(nextFromImage.stateKind(), ViewerStateKind::StandalonePreview);
+        nextFromImage.notifyInitialImagePainted();
+        QTRY_COMPARE(nextFromImage.stateKind(), ViewerStateKind::VolumeReady);
+        QCOMPARE(nextFromImage.currentPageName(), QStringLiteral("page2.png"));
+        QVERIFY(nextFromImage.nextVolume());
+        QCOMPARE(QFileInfo(nextFromImage.volumePath()).fileName(), QStringLiteral("Volume10"));
+
+        ViewerSession previousFromImage(nullptr);
+        QVERIFY(previousFromImage.openFileInContainer(selectedPage));
+        QTRY_COMPARE(previousFromImage.stateKind(), ViewerStateKind::StandalonePreview);
+        previousFromImage.notifyInitialImagePainted();
+        QTRY_COMPARE(previousFromImage.stateKind(), ViewerStateKind::VolumeReady);
+        QVERIFY(previousFromImage.prevVolume());
+        QCOMPARE(QFileInfo(previousFromImage.volumePath()).fileName(), QStringLiteral("Volume1"));
+    }
+
+    void directArchiveNavigationUsesTheArchiveFileAsTheVolume()
+    {
+        const int previousCacheSize = qApp->MaxVolumesCache();
+        const bool previousOpenProgress = qApp->OpenVolumeWithProgress();
+        const auto restore = qScopeGuard([&] {
+            qApp->setMaxVolumesCache(previousCacheSize);
+            qApp->setOpenVolumeWithProgress(previousOpenProgress);
+        });
+        qApp->setMaxVolumesCache(5);
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setDualView(false);
+
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString series = directory.filePath(QStringLiteral("Series"));
+        QVERIFY(QDir().mkpath(series));
+        const QString archiveSource = QString(FILELOADER_DATAPATH "7z/image.7z");
+        for (const QString &name : {QStringLiteral("Volume1.7z"),
+                                    QStringLiteral("Volume2.7z"),
+                                    QStringLiteral("Volume10.7z")}) {
+            QVERIFY(QFile::copy(archiveSource, QDir(series).filePath(name)));
+        }
+
+        ViewerSession nextSession(nullptr);
+        QVERIFY(nextSession.openContainer(QDir(series).filePath(QStringLiteral("Volume2.7z"))));
+        QVERIFY(nextSession.isArchive());
+        QVERIFY(nextSession.nextVolume());
+        QCOMPARE(QFileInfo(nextSession.volumePath()).fileName(), QStringLiteral("Volume10.7z"));
+
+        ViewerSession previousSession(nullptr);
+        QVERIFY(previousSession.openContainer(QDir(series).filePath(QStringLiteral("Volume2.7z"))));
+        QVERIFY(previousSession.prevVolume());
+        QCOMPARE(QFileInfo(previousSession.volumePath()).fileName(), QStringLiteral("Volume1.7z"));
+    }
+
+    void subfolderScanningDoesNotChangeTheOpenedVolumeNavigationOrigin()
+    {
+        const int previousCacheSize = qApp->MaxVolumesCache();
+        const bool previousOpenProgress = qApp->OpenVolumeWithProgress();
+        const bool previousShowSubfolders = qApp->ShowSubfolders();
+        const auto restore = qScopeGuard([&] {
+            qApp->setMaxVolumesCache(previousCacheSize);
+            qApp->setOpenVolumeWithProgress(previousOpenProgress);
+            qApp->setShowSubfolders(previousShowSubfolders);
+        });
+        qApp->setMaxVolumesCache(5);
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setShowSubfolders(true);
+        qApp->setDualView(false);
+
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString series = directory.filePath(QStringLiteral("Series"));
+        const QString volume2 = QDir(series).filePath(QStringLiteral("Volume2"));
+        const QString nestedVolumeContent = QDir(volume2).filePath(QStringLiteral("Disc1"));
+        const QString volume10 = QDir(series).filePath(QStringLiteral("Volume10"));
+        const QStringList pages{QStringLiteral("page1.png"), QStringLiteral("page2.png")};
+        QVERIFY(writeImageVolume(nestedVolumeContent, pages));
+        QVERIFY(writeImageVolume(volume10, pages));
+
+        ViewerSession session(nullptr);
+        QVERIFY(session.openContainer(volume2));
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume2"));
+        QCOMPARE(session.pageCount(), 2);
+        QVERIFY(session.nextVolume());
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume10"));
+    }
+
+    void mixedSiblingVolumesFollowDirectoryThenFileGroups()
+    {
+        const int previousCacheSize = qApp->MaxVolumesCache();
+        const bool previousOpenProgress = qApp->OpenVolumeWithProgress();
+        const auto restore = qScopeGuard([&] {
+            qApp->setMaxVolumesCache(previousCacheSize);
+            qApp->setOpenVolumeWithProgress(previousOpenProgress);
+        });
+        qApp->setMaxVolumesCache(5);
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setDualView(false);
+
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString series = directory.filePath(QStringLiteral("Series"));
+        const QStringList pages{QStringLiteral("page1.png"), QStringLiteral("page2.png")};
+        QVERIFY(writeImageVolume(QDir(series).filePath(QStringLiteral("Volume2")), pages));
+        QVERIFY(writeImageVolume(QDir(series).filePath(QStringLiteral("Volume10")), pages));
+        const QString archiveSource = QString(FILELOADER_DATAPATH "7z/image.7z");
+        for (const QString &name : {QStringLiteral("Volume1.7z"), QStringLiteral("Volume20.7z")}) {
+            QVERIFY(QFile::copy(archiveSource, QDir(series).filePath(name)));
+        }
+
+        ViewerSession session(nullptr);
+        QVERIFY(session.openContainer(QDir(series).filePath(QStringLiteral("Volume2"))));
+        QVERIFY(session.nextVolume());
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume10"));
+        QVERIFY(session.nextVolume());
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume1.7z"));
+        QVERIFY(session.nextVolume());
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume20.7z"));
+
+        ViewerSession reverseSession(nullptr);
+        QVERIFY(reverseSession.openContainer(QDir(series).filePath(QStringLiteral("Volume1.7z"))));
+        QVERIFY(reverseSession.prevVolume());
+        QCOMPARE(QFileInfo(reverseSession.volumePath()).fileName(), QStringLiteral("Volume10"));
+    }
+
+    void adjacentVolumeNavigationSkipsUnopenableCandidates_data()
+    {
+        QTest::addColumn<int>("cacheSize");
+        QTest::addColumn<bool>("hasOpenableCandidate");
+        QTest::newRow("cache-1-openable") << 1 << true;
+        QTest::newRow("cache-1-all-fail") << 1 << false;
+        QTest::newRow("cache-2-openable") << 2 << true;
+        QTest::newRow("cache-2-all-fail") << 2 << false;
+        QTest::newRow("cache-5-openable") << 5 << true;
+        QTest::newRow("cache-5-all-fail") << 5 << false;
+    }
+
+    void adjacentVolumeNavigationSkipsUnopenableCandidates()
+    {
+        QFETCH(int, cacheSize);
+        QFETCH(bool, hasOpenableCandidate);
+        const int previousCacheSize = qApp->MaxVolumesCache();
+        const bool previousOpenProgress = qApp->OpenVolumeWithProgress();
+        const auto previousSort = qApp->ImageSortBy();
+        const auto restore = qScopeGuard([&] {
+            qApp->setMaxVolumesCache(previousCacheSize);
+            qApp->setOpenVolumeWithProgress(previousOpenProgress);
+            qApp->setImageSortBy(previousSort);
+        });
+        qApp->setMaxVolumesCache(cacheSize);
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setDualView(false);
+        qApp->setImageSortBy(qvEnums::ImageSortBy::SortByFileName);
+
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString volume1 = directory.filePath(QStringLiteral("Volume1"));
+        QVERIFY(writeImageVolume(volume1,
+                                 {QStringLiteral("page1.png"),
+                                  QStringLiteral("page2.png"),
+                                  QStringLiteral("page10.png")}));
+        QVERIFY(QDir().mkpath(directory.filePath(QStringLiteral("Volume2"))));
+        QFile ordinaryFile(directory.filePath(QStringLiteral("Volume3.txt")));
+        QVERIFY(ordinaryFile.open(QIODevice::WriteOnly));
+        ordinaryFile.write("not a volume");
+        ordinaryFile.close();
+        QVERIFY(QFile::copy(QString(FILELOADER_DATAPATH "7z/password.7z"),
+                            directory.filePath(QStringLiteral("Volume4.7z"))));
+        if (hasOpenableCandidate) {
+            QVERIFY(QFile::copy(QString(FILELOADER_DATAPATH "7z/image.7z"),
+                                directory.filePath(QStringLiteral("Volume5.7z"))));
+        }
+
+        ViewerSession session(nullptr);
+        QVERIFY(session.openContainer(volume1));
+        QVERIFY(session.selectPage(1));
+        QCOMPARE(session.currentPageName(), QStringLiteral("page2.png"));
+
+        if (hasOpenableCandidate) {
+            QVERIFY(session.nextVolume());
+            QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume5.7z"));
+            QCOMPARE(session.currentPageIndex(), 0);
+        } else {
+            QVERIFY(!session.nextVolume());
+            QCOMPARE(session.stateKind(), ViewerStateKind::VolumeReady);
+            QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume1"));
+            QCOMPARE(session.currentPageName(), QStringLiteral("page2.png"));
+            QCOMPARE(session.currentPageIndex(), 1);
+        }
+    }
+
+    void adjacentVolumeNavigationSkipsUndecodableCovers()
+    {
+        const bool previousProgress = qApp->OpenVolumeWithProgress();
+        const auto restore =
+            qScopeGuard([&] { qApp->setOpenVolumeWithProgress(previousProgress); });
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setDualView(false);
+        TestTemporaryDir root;
+        QVERIFY(root.isValid());
+        const QString first = root.filePath(QStringLiteral("Book1"));
+        const QString corrupt = root.filePath(QStringLiteral("Book2"));
+        const QString next = root.filePath(QStringLiteral("Book3"));
+        QVERIFY(writeImageVolume(first, {QStringLiteral("page.png")}));
+        QVERIFY(QDir().mkpath(corrupt));
+        QFile invalid(QDir(corrupt).filePath(QStringLiteral("page.png")));
+        QVERIFY(invalid.open(QIODevice::WriteOnly));
+        invalid.write("not a PNG");
+        invalid.close();
+        QVERIFY(writeImageVolume(next, {QStringLiteral("page.png")}));
+
+        ViewerSession session(nullptr);
+        QVERIFY(session.openContainer(first));
+        QVERIFY(session.nextVolume());
+        QCOMPARE(QDir::cleanPath(session.volumePath()), QDir::cleanPath(next));
+        QCOMPARE(session.currentPageName(), QStringLiteral("page.png"));
+    }
+
+    void adjacentVolumeFailuresPreserveTheCurrentPageAndReportTheError()
+    {
+        const bool previousProgress = qApp->OpenVolumeWithProgress();
+        const auto restore =
+            qScopeGuard([&] { qApp->setOpenVolumeWithProgress(previousProgress); });
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setDualView(false);
+        TestTemporaryDir root;
+        QVERIFY(root.isValid());
+        const QString first = root.filePath(QStringLiteral("Book1"));
+        const QString corrupt = root.filePath(QStringLiteral("Book2"));
+        QVERIFY(writeImageVolume(first, {QStringLiteral("01.png"), QStringLiteral("02.png")}));
+        QVERIFY(QDir().mkpath(corrupt));
+        QFile invalid(QDir(corrupt).filePath(QStringLiteral("page.png")));
+        QVERIFY(invalid.open(QIODevice::WriteOnly));
+        invalid.write("not a PNG");
+        invalid.close();
+        ViewerSession session(nullptr);
+        QVERIFY(session.openContainer(first));
+        QVERIFY(session.selectPage(1));
+        QVERIFY(!session.nextVolume());
+        QCOMPARE(QDir::cleanPath(session.volumePath()), QDir::cleanPath(first));
+        QCOMPARE(session.currentPageName(), QStringLiteral("02.png"));
+        QCOMPARE(session.stateKind(), ViewerStateKind::VolumeReady);
+        QCOMPARE(session.loadStatus().failureReason, LoadFailureReason::DecodeFailed);
+    }
+
+    void volumeNavigationRebuildsCachedNamesWhenTheCurrentVolumeIsMissing()
+    {
+        const int previousCacheSize = qApp->MaxVolumesCache();
+        const bool previousOpenProgress = qApp->OpenVolumeWithProgress();
+        const auto restore = qScopeGuard([&] {
+            qApp->setMaxVolumesCache(previousCacheSize);
+            qApp->setOpenVolumeWithProgress(previousOpenProgress);
+        });
+        qApp->setMaxVolumesCache(5);
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setDualView(false);
+
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString volume1 = directory.filePath(QStringLiteral("Volume1"));
+        const QString volume2 = directory.filePath(QStringLiteral("Volume2"));
+        const QString volume3 = directory.filePath(QStringLiteral("Volume3"));
+        const QStringList pages{QStringLiteral("page1.png"), QStringLiteral("page2.png")};
+        QVERIFY(writeImageVolume(volume1, pages));
+
+        ViewerSession session(nullptr);
+        QVERIFY(session.openContainer(volume1));
+        QVERIFY(!session.nextVolume()); // Cache the initial one-entry sibling list.
+
+        QVERIFY(writeImageVolume(volume2, pages));
+        QVERIFY(writeImageVolume(volume3, pages));
+        QVERIFY(session.openContainer(volume2, true)); // Keep the stale sibling list.
+        QVERIFY(session.nextVolume());
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume3"));
     }
 
     void openTargetClassifiesPaths()
@@ -3943,6 +4548,373 @@ private slots:
         QCOMPARE(first.scaleFactor(), 3.5);
         QVERIFY(!second.isActive());
         QCOMPARE(second.scaleFactor(), 3.0);
+    }
+
+    void ordinaryPageNavigationWrapsOnlyWhenEnabled()
+    {
+        const int previousCacheSize = qApp->MaxVolumesCache();
+        const bool previousOpenProgress = qApp->OpenVolumeWithProgress();
+        const bool previousWrap = qApp->WrapPageNavigationAcrossVolumes();
+        const auto previousSort = qApp->ImageSortBy();
+        const auto restore = qScopeGuard([&] {
+            qApp->setMaxVolumesCache(previousCacheSize);
+            qApp->setOpenVolumeWithProgress(previousOpenProgress);
+            qApp->setWrapPageNavigationAcrossVolumes(previousWrap);
+            qApp->setImageSortBy(previousSort);
+        });
+        qApp->setMaxVolumesCache(5);
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setWrapPageNavigationAcrossVolumes(false);
+        qApp->setImageSortBy(qvEnums::ImageSortBy::SortByFileName);
+        qApp->setDualView(false);
+        qApp->setSeparatePagesWhenWideImage(false);
+
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString series = directory.filePath(QStringLiteral("Series"));
+        const QString volume1 = QDir(series).filePath(QStringLiteral("Volume1"));
+        const QString volume2 = QDir(series).filePath(QStringLiteral("Volume2"));
+        const QString volume10 = QDir(series).filePath(QStringLiteral("Volume10"));
+        const QStringList pages{
+            QStringLiteral("page1.png"), QStringLiteral("page2.png"), QStringLiteral("page10.png")};
+        QVERIFY(writeImageVolume(volume1, pages));
+        QVERIFY(writeImageVolume(volume2, pages));
+        QVERIFY(writeImageVolume(volume10, pages));
+
+        ViewerSession session(nullptr);
+        ImageView view;
+        view.setViewerSession(&session);
+        QVERIFY(session.openContainer(volume2));
+        QVERIFY(session.lastPage());
+        view.handleNextPageActionTriggered();
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume2"));
+        QCOMPARE(session.currentPageIndex(), 2);
+
+        view.handleWrapPageNavigationAcrossVolumesActionTriggered(true);
+        QVERIFY(qApp->WrapPageNavigationAcrossVolumes());
+        view.handleNextPageActionTriggered();
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume10"));
+        QCOMPARE(session.currentPageIndex(), 0);
+
+        QVERIFY(session.openContainer(volume2));
+        QVERIFY(session.firstPage());
+        view.handlePrevPageActionTriggered();
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume1"));
+        QCOMPARE(session.currentPageIndex(), 2);
+        QCOMPARE(session.currentPageName(), QStringLiteral("page10.png"));
+
+        // The explicit commands retain their original behaviour with the
+        // optional ordinary-page wrapping setting turned off.
+        view.handleWrapPageNavigationAcrossVolumesActionTriggered(false);
+        QVERIFY(!qApp->WrapPageNavigationAcrossVolumes());
+        QVERIFY(session.openContainer(volume2));
+        QVERIFY(session.lastPage());
+        view.handleNextPageOrVolumeActionTriggered();
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume10"));
+        QCOMPARE(session.currentPageIndex(), 0);
+
+        QVERIFY(session.openContainer(volume2));
+        QVERIFY(session.firstPage());
+        view.handlePrevPageOrVolumeActionTriggered();
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume1"));
+        QCOMPARE(session.currentPageIndex(), 2);
+    }
+
+    void onePageActionsFollowTheSameOptionalVolumeBoundarySetting()
+    {
+        const bool previousWrap = qApp->WrapPageNavigationAcrossVolumes();
+        const bool previousProgress = qApp->OpenVolumeWithProgress();
+        const auto restore = qScopeGuard([&] {
+            qApp->setWrapPageNavigationAcrossVolumes(previousWrap);
+            qApp->setOpenVolumeWithProgress(previousProgress);
+        });
+        qApp->setWrapPageNavigationAcrossVolumes(true);
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setDualView(false);
+        qApp->setSeparatePagesWhenWideImage(false);
+
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString first = directory.filePath(QStringLiteral("Book1"));
+        const QString second = directory.filePath(QStringLiteral("Book2"));
+        QVERIFY(writeImageVolume(first, {QStringLiteral("01.png")}));
+        QVERIFY(writeImageVolume(second, {QStringLiteral("01.png")}));
+        ViewerSession session(nullptr);
+        ImageView view;
+        view.setViewerSession(&session);
+        QVERIFY(session.openContainer(first));
+
+        view.handleNextOnePageActionTriggered();
+        QCOMPARE(QDir::cleanPath(session.volumePath()), QDir::cleanPath(second));
+        view.handlePrevOnePageActionTriggered();
+        QCOMPARE(QDir::cleanPath(session.volumePath()), QDir::cleanPath(first));
+
+        qApp->setWrapPageNavigationAcrossVolumes(false);
+        view.handlePrevOnePageActionTriggered();
+        QCOMPARE(QDir::cleanPath(session.volumePath()), QDir::cleanPath(first));
+    }
+
+    void equivalentVolumePathSpellingsShareReadProgress()
+    {
+        const bool previousProgress = qApp->OpenVolumeWithProgress();
+        const auto restore =
+            qScopeGuard([&] { qApp->setOpenVolumeWithProgress(previousProgress); });
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setDualView(false);
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString folder = directory.filePath(QStringLiteral("Book1"));
+        QVERIFY(writeImageVolume(folder, {QStringLiteral("01.png"), QStringLiteral("02.png")}));
+        const QString alternative = folder + QStringLiteral("/./");
+
+        ViewerSession session(nullptr);
+        QVERIFY(session.openContainer(alternative));
+        QVERIFY(session.selectPage(1));
+        ReadProgressStore *store = qApp->readProgressStore();
+        QVERIFY(store);
+        QVERIFY(store->contains(folder));
+        QCOMPARE(store->at(folder).currentPageName, QStringLiteral("02.png"));
+        QCOMPARE(store->at(alternative).currentPageName, QStringLiteral("02.png"));
+        QCOMPARE(ReadProgressStore::normalizedPath(folder),
+                 ReadProgressStore::normalizedPath(alternative));
+    }
+
+    void manuallyTurningASplitWidePageStopsSlideshow()
+    {
+        const bool previousRandom = qApp->SlideShowRandomly();
+        const bool previousSeparate = qApp->SeparatePagesWhenWideImage();
+        const auto restore = qScopeGuard([&] {
+            qApp->setSlideShowRandomly(previousRandom);
+            qApp->setSeparatePagesWhenWideImage(previousSeparate);
+        });
+        qApp->setSlideShowRandomly(false);
+        qApp->setDualView(false);
+        qApp->setSeparatePagesWhenWideImage(true);
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString folder = directory.filePath(QStringLiteral("Book1"));
+        QVERIFY(writeImageVolume(folder, {QStringLiteral("wide.png")}, QSize(256, 32)));
+
+        ViewerSession session(nullptr);
+        ImageView view;
+        view.resize(200, 400);
+        view.setViewerSession(&session);
+        QVERIFY(session.openContainer(folder));
+        view.toggleSlideShow();
+        QVERIFY(view.isSlideShow());
+        view.handleNextPageActionTriggered();
+        QVERIFY(!view.isSlideShow());
+        QCOMPARE(session.currentPageIndex(), 0);
+    }
+
+    void ordinaryPageNavigationDoesNotWrapOutOfASingleVolume()
+    {
+        const int previousCacheSize = qApp->MaxVolumesCache();
+        const bool previousOpenProgress = qApp->OpenVolumeWithProgress();
+        const bool previousWrap = qApp->WrapPageNavigationAcrossVolumes();
+        const auto restore = qScopeGuard([&] {
+            qApp->setMaxVolumesCache(previousCacheSize);
+            qApp->setOpenVolumeWithProgress(previousOpenProgress);
+            qApp->setWrapPageNavigationAcrossVolumes(previousWrap);
+        });
+        qApp->setMaxVolumesCache(5);
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setDualView(false);
+        qApp->setSeparatePagesWhenWideImage(false);
+        qApp->setWrapPageNavigationAcrossVolumes(true);
+
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString volume = directory.filePath(QStringLiteral("OnlyVolume"));
+        QVERIFY(writeImageVolume(volume,
+                                 {QStringLiteral("page1.png"),
+                                  QStringLiteral("page2.png"),
+                                  QStringLiteral("page10.png")}));
+
+        ViewerSession session(nullptr);
+        ImageView view;
+        view.setViewerSession(&session);
+        QVERIFY(session.openContainer(volume));
+        QVERIFY(session.firstPage());
+        view.handlePrevPageActionTriggered();
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("OnlyVolume"));
+        QCOMPARE(session.currentPageIndex(), 0);
+
+        QVERIFY(session.lastPage());
+        view.handleNextPageActionTriggered();
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("OnlyVolume"));
+        QCOMPARE(session.currentPageIndex(), 2);
+    }
+
+    void ordinaryPageNavigationWrapsAtDualViewSpreadBoundaries()
+    {
+        const int previousCacheSize = qApp->MaxVolumesCache();
+        const bool previousOpenProgress = qApp->OpenVolumeWithProgress();
+        const bool previousDualView = qApp->DualView();
+        const bool previousWrap = qApp->WrapPageNavigationAcrossVolumes();
+        const bool previousSeparatePages = qApp->SeparatePagesWhenWideImage();
+        const auto previousSort = qApp->ImageSortBy();
+        const auto restore = qScopeGuard([&] {
+            qApp->setMaxVolumesCache(previousCacheSize);
+            qApp->setOpenVolumeWithProgress(previousOpenProgress);
+            qApp->setDualView(previousDualView);
+            qApp->setWrapPageNavigationAcrossVolumes(previousWrap);
+            qApp->setSeparatePagesWhenWideImage(previousSeparatePages);
+            qApp->setImageSortBy(previousSort);
+        });
+        qApp->setMaxVolumesCache(5);
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setDualView(true);
+        qApp->setSeparatePagesWhenWideImage(false);
+        qApp->setWrapPageNavigationAcrossVolumes(true);
+        qApp->setImageSortBy(qvEnums::ImageSortBy::SortByFileName);
+
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString series = directory.filePath(QStringLiteral("Series"));
+        const QString volume1 = QDir(series).filePath(QStringLiteral("Volume1"));
+        const QString volume2 = QDir(series).filePath(QStringLiteral("Volume2"));
+        const QString volume10 = QDir(series).filePath(QStringLiteral("Volume10"));
+        const QStringList pages{QStringLiteral("page1.png"),
+                                QStringLiteral("page2.png"),
+                                QStringLiteral("page3.png"),
+                                QStringLiteral("page4.png")};
+        QVERIFY(writeImageVolume(volume1, pages));
+        QVERIFY(writeImageVolume(volume2, pages));
+        QVERIFY(writeImageVolume(volume10, pages));
+
+        ViewerSession session(nullptr);
+        ImageView view;
+        view.setViewerSession(&session);
+        QVERIFY(session.openContainer(volume2));
+        QVERIFY(session.selectPage(2));
+        QCOMPARE(session.visiblePageCount(), 2);
+        view.handleNextPageActionTriggered();
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume10"));
+        QCOMPARE(session.currentPageIndex(), 0);
+        QCOMPARE(session.visiblePageCount(), 2);
+
+        QVERIFY(session.openContainer(volume2));
+        QVERIFY(session.firstPage());
+        view.handlePrevPageActionTriggered();
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume1"));
+        QCOMPARE(session.currentPageIndex(), 3);
+        QCOMPARE(session.currentPageName(), QStringLiteral("page4.png"));
+    }
+
+    void ordinaryPageNavigationWrapsAfterTheSecondHalfOfAWideImage()
+    {
+        const int previousCacheSize = qApp->MaxVolumesCache();
+        const bool previousOpenProgress = qApp->OpenVolumeWithProgress();
+        const bool previousWrap = qApp->WrapPageNavigationAcrossVolumes();
+        const auto restore = qScopeGuard([&] {
+            qApp->setMaxVolumesCache(previousCacheSize);
+            qApp->setOpenVolumeWithProgress(previousOpenProgress);
+            qApp->setWrapPageNavigationAcrossVolumes(previousWrap);
+        });
+        qApp->setMaxVolumesCache(5);
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setDualView(false);
+        qApp->setSeparatePagesWhenWideImage(true);
+        qApp->setWrapPageNavigationAcrossVolumes(true);
+        qApp->setImageSortBy(qvEnums::ImageSortBy::SortByFileName);
+
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString series = directory.filePath(QStringLiteral("Series"));
+        const QString volume1 = QDir(series).filePath(QStringLiteral("Volume1"));
+        const QString volume2 = QDir(series).filePath(QStringLiteral("Volume2"));
+        const QString volume10 = QDir(series).filePath(QStringLiteral("Volume10"));
+        const QStringList pages{QStringLiteral("wide.png")};
+        const QSize wideSize(128, 32);
+        QVERIFY(writeImageVolume(volume1, pages, wideSize));
+        QVERIFY(writeImageVolume(volume2, pages, wideSize));
+        QVERIFY(writeImageVolume(volume10, pages, wideSize));
+
+        ViewerSession session(nullptr);
+        ImageView view;
+        view.resize(200, 400);
+        view.setViewerSession(&session);
+        QVERIFY(session.openContainer(volume2));
+
+        view.handleNextPageActionTriggered(); // First half to second half.
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume2"));
+        QCOMPARE(session.currentPageIndex(), 0);
+        view.handleNextPageActionTriggered(); // Only now may the volume wrap.
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume10"));
+
+        QVERIFY(session.openContainer(volume2));
+        view.handlePrevPageActionTriggered();
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume1"));
+        QCOMPARE(session.currentPageIndex(), 0);
+    }
+
+    void slideshowStillLoopsWithinTheCurrentVolumeWhenWrappingIsEnabled()
+    {
+        const int previousCacheSize = qApp->MaxVolumesCache();
+        const bool previousOpenProgress = qApp->OpenVolumeWithProgress();
+        const bool previousWrap = qApp->WrapPageNavigationAcrossVolumes();
+        const auto restore = qScopeGuard([&] {
+            qApp->setMaxVolumesCache(previousCacheSize);
+            qApp->setOpenVolumeWithProgress(previousOpenProgress);
+            qApp->setWrapPageNavigationAcrossVolumes(previousWrap);
+        });
+        qApp->setMaxVolumesCache(5);
+        qApp->setOpenVolumeWithProgress(false);
+        qApp->setDualView(false);
+        qApp->setSeparatePagesWhenWideImage(false);
+        qApp->setWrapPageNavigationAcrossVolumes(true);
+        qApp->setImageSortBy(qvEnums::ImageSortBy::SortByFileName);
+
+        TestTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString series = directory.filePath(QStringLiteral("Series"));
+        const QString volume2 = QDir(series).filePath(QStringLiteral("Volume2"));
+        const QString volume10 = QDir(series).filePath(QStringLiteral("Volume10"));
+        const QStringList pages{QStringLiteral("page1.png"), QStringLiteral("page2.png")};
+        QVERIFY(writeImageVolume(volume2, pages));
+        QVERIFY(writeImageVolume(volume10, pages));
+
+        ViewerSession session(nullptr);
+        ImageView view;
+        view.setViewerSession(&session);
+        QVERIFY(session.openContainer(volume2));
+        QVERIFY(session.lastPage());
+        view.handleSlideShowTimerTimeout();
+        QCOMPARE(QFileInfo(session.volumePath()).fileName(), QStringLiteral("Volume2"));
+        QCOMPARE(session.currentPageIndex(), 0);
+    }
+
+    void wrapPageNavigationSettingDefaultsOffAndPersists()
+    {
+        const QString settingsPath =
+            qApp->getFilePathOfApplicationSetting(StorageLocation::settingsSubPath());
+        QSettings settings(settingsPath, QSettings::IniFormat);
+        const QString key = QStringLiteral("View/WrapPageNavigationAcrossVolumes");
+        const bool hadStoredValue = settings.contains(key);
+        const QVariant storedValue = settings.value(key);
+        const bool previousEnabled = qApp->WrapPageNavigationAcrossVolumes();
+        const auto restore = qScopeGuard([&] {
+            if (hadStoredValue) {
+                settings.setValue(key, storedValue);
+            } else {
+                settings.remove(key);
+            }
+            settings.sync();
+            qApp->setWrapPageNavigationAcrossVolumes(previousEnabled);
+        });
+
+        settings.remove(key);
+        settings.sync();
+        qApp->loadSettings();
+        QVERIFY(!qApp->WrapPageNavigationAcrossVolumes());
+
+        qApp->setWrapPageNavigationAcrossVolumes(true);
+        qApp->saveSettings();
+        settings.sync();
+        QVERIFY(settings.value(key, false).toBool());
+        qApp->loadSettings();
+        QVERIFY(qApp->WrapPageNavigationAcrossVolumes());
     }
 
     void standalonePreviewNavigationIsSafe()

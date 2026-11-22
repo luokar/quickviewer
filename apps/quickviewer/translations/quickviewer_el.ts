@@ -1807,6 +1807,11 @@
         <translation>Διαίρεση ευρείας εικόνας σε 2 σελίδες</translation>
     </message>
     <message>
+        <location filename="../src/mainwindow.ui" line="1159"/>
+        <source>Wrap next/prev page across volumes</source>
+        <translation>Μετάβαση στον επόμενο/προηγούμενο τόμο κατά την αλλαγή σελίδας</translation>
+    </message>
+    <message>
         <location filename="../src/mainwindow.ui" line="1161"/>
         <source>Loupe</source>
         <translation type="unfinished"></translation>

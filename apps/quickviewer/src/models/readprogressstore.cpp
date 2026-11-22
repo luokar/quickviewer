@@ -50,6 +50,7 @@ ReadProgressStore::ReadProgressMap ReadProgressStore::initializeAsync()
         settings.beginGroup(g);
         QString path = settings.value("Path", "").toString();
         if (path.isEmpty()) {
+            settings.endGroup();
             continue;
         }
         QString title = settings.value("Title", "").toString();
@@ -58,7 +59,7 @@ ReadProgressStore::ReadProgressMap ReadProgressStore::initializeAsync()
         int current = settings.value("Current", 0).toInt();
         bool completed = settings.value("Completed", false).toBool();
         ReadProgress progress = {title, path, currentPage, pages, current, completed};
-        result[path] = progress;
+        result[normalizedPath(path)] = progress;
         settings.endGroup();
     }
     return result;
@@ -66,6 +67,14 @@ ReadProgressStore::ReadProgressMap ReadProgressStore::initializeAsync()
 
 void ReadProgressStore::handleInitializationFinished()
 {
-    m_progressByVolumePath = m_initializeWatcher.result();
+    // A page may have been opened while the settings were loading. The
+    // in-session position is newer and must not be replaced by the old disk
+    // snapshot just because the background task finished later.
+    const ReadProgressMap loaded = m_initializeWatcher.result();
+    for (auto it = loaded.cbegin(); it != loaded.cend(); ++it) {
+        if (!m_progressByVolumePath.contains(it.key())) {
+            m_progressByVolumePath.insert(it.key(), it.value());
+        }
+    }
     emit progressLoaded();
 }

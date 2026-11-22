@@ -1746,6 +1746,11 @@
         <translation>Diviser grande image en 2 pages</translation>
     </message>
     <message>
+        <location filename="../src/mainwindow.ui" line="1159"/>
+        <source>Wrap next/prev page across volumes</source>
+        <translation>Passer au tome suivant/précédent en tournant les pages</translation>
+    </message>
+    <message>
         <location filename="../src/mainwindow.ui" line="1161"/>
         <source>Loupe</source>
         <translation>Outil Loupe</translation>

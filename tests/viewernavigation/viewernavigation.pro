@@ -66,6 +66,7 @@ SOURCES += \
     ../../apps/quickviewer/src/models/imagedecoder.cpp \
     ../../apps/quickviewer/src/models/jpegorientation.cpp \
     ../../apps/quickviewer/src/models/volumeloader.cpp \
+    ../../apps/quickviewer/src/models/volumenavigation.cpp \
     ../../apps/quickviewer/src/models/volumelocation.cpp \
     ../../apps/quickviewer/src/models/storedvolumelocation.cpp \
     ../../apps/quickviewer/src/qactionmanager/keyconfigdialog.cpp \
@@ -115,6 +116,7 @@ HEADERS += \
     ../../apps/quickviewer/src/models/jpegorientation.h \
     ../../apps/quickviewer/src/models/decodemetricsscope.h \
     ../../apps/quickviewer/src/models/volumeloader.h \
+    ../../apps/quickviewer/src/models/volumenavigation.h \
     ../../apps/quickviewer/src/models/volumelocation.h \
     ../../apps/quickviewer/src/models/storedvolumelocation.h \
     ../../apps/quickviewer/src/qactionmanager/keyconfigdialog.h \

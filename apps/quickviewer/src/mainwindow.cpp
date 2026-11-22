@@ -1381,14 +1381,30 @@ void MainWindow::updateFolderViewCurrentItem()
     }
     const QString path = m_viewerSession.isArchive() ? m_viewerSession.volumePath()
                                                      : m_viewerSession.currentPagePath();
-    if (!path.isEmpty() || !m_viewerSession.initialImagePaintPending()) {
+    if (!path.isEmpty()) {
         m_folderViewRequestedPath = path;
+    } else if (const ViewerLoadStatus &status = m_viewerSession.loadStatus();
+               status.phase == ViewerLoadPhase::Failed &&
+               status.targetKind == LoadTargetKind::Archive &&
+               status.failureReason == LoadFailureReason::NoViewableImages) {
+        // An archive without readable pages is still the explicitly selected
+        // entry in Folder. Keep it highlighted while the central viewer
+        // explains why no page can be displayed.
+        m_folderViewRequestedPath = status.requestedPath;
+    } else if (!m_viewerSession.initialImagePaintPending()) {
+        m_folderViewRequestedPath.clear();
     }
     m_folderWindow->handleViewerSessionVolumeChanged(m_folderViewRequestedPath);
 }
 
 bool MainWindow::changeFolderPath(QString path)
 {
+    if (m_viewerSession.initialImagePaintPending()) {
+        // The archive's volumeChanged signal arrives before its first paint;
+        // keep the requested folder/selection for initializeStartupPanel().
+        m_pendingFolderPath = path;
+        return false;
+    }
     // VolumeChanged may already have changed the Folder directory. Explicit
     // opens must not enumerate that same directory a second time.
     const QFileInfo requestedInfo(path);
@@ -1400,10 +1416,6 @@ bool MainWindow::changeFolderPath(QString path)
             m_pendingFolderPath.clear();
             return true;
         }
-    }
-    if (m_viewerSession.initialImagePaintPending()) {
-        m_pendingFolderPath = path;
-        return false;
     }
     if (!m_folderWindow) {
         // An image passed on the command line is loaded before setCatalogDatabase()

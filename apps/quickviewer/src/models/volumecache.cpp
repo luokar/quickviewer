@@ -124,11 +124,20 @@ void VolumeCache::invalidate(const VolumeCacheKey &key)
 
 void VolumeCache::invalidatePath(const QString &normalizedVolumePath)
 {
+    // VolumeCacheKey uses case-folded path keys on Windows. Archive removal
+    // supplies the real filesystem spelling, which may contain uppercase
+    // drive, user, or Temp directory names. Compare using the same identity
+    // before releasing all cached handles for the archive.
+#ifdef Q_OS_WIN
+    const QString lookupPath = normalizedVolumePath.toCaseFolded();
+#else
+    const QString &lookupPath = normalizedVolumePath;
+#endif
     QList<VolumeCacheKey> keys = m_loads.keys();
     keys += m_generations.keys();
     keys += m_recentErrors.keys();
     for (const VolumeCacheKey &key : keys) {
-        if (key.normalizedVolumePath == normalizedVolumePath) {
+        if (key.normalizedVolumePath == lookupPath) {
             invalidate(key);
         }
     }

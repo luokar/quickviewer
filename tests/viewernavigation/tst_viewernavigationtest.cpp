@@ -4407,6 +4407,29 @@ private slots:
         QCOMPARE(startCount, 2);
     }
 
+    void invalidatingAnArchivePathReleasesEveryCachedVariantOnWindows()
+    {
+        const QString archivePath =
+            QDir::cleanPath(QDir(QDir::tempPath()).filePath(QStringLiteral("MixedCase/Book.7z")));
+        QString cachePath = archivePath;
+#ifdef Q_OS_WIN
+        cachePath = cachePath.toCaseFolded();
+#endif
+        VolumeCache cache(3);
+        const VolumeCacheKey first{cachePath, false, false};
+        const VolumeCacheKey second{cachePath, true, true};
+        cache.insertReady(first, {});
+        cache.insertReady(second, {});
+        QVERIFY(cache.contains(first));
+        QVERIFY(cache.contains(second));
+
+        // The archive removal plan uses the original on-disk spelling,
+        // whereas cache keys may be lower-case on Windows.
+        cache.invalidatePath(archivePath);
+        QVERIFY(!cache.contains(first));
+        QVERIFY(!cache.contains(second));
+    }
+
     void emptyImageViewNavigationIsSafe()
     {
         ViewerSession session(nullptr);
@@ -4834,6 +4857,10 @@ private slots:
         ViewerSession session(nullptr);
         ImageView view;
         view.resize(200, 400);
+        // QGraphicsView doesn't lay out its viewport reliably before it has
+        // been shown. Split-wide navigation depends on a portrait viewport.
+        view.show();
+        QTRY_VERIFY(view.viewport()->height() > view.viewport()->width());
         view.setViewerSession(&session);
         QVERIFY(session.openContainer(volume2));
 
